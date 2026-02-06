@@ -1,0 +1,8 @@
+https://github.com/DLR-RM/stable-baselines3
+https://github.com/LonamiWebs/Telethon
+https://github.com/MagicStack/asyncpg
+https://github.com/1adrianb/face-alignment
+https://github.com/Kaggle/kaggle-api
+https://github.com/Mebus/cupp
+https://github.com/Bogdanp/dramatiq
+https://github.com/Guake/guake
