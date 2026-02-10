@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 import re
-
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -15,6 +15,42 @@ from datasets import Dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM, TrainerCallback
 from trl import SFTTrainer, SFTConfig
 import wandb
+
+
+_DEBUG_STEP = {"global": 0, "collator_calls": 0, "eval_calls": 0, "in_eval": False}
+_DEBUG_PRINT_EVERY = 50  # print debug info every N steps
+_DEBUG_FIRST_N = 5       # always print first N steps
+_DEBUG_EVAL_FIRST_N = 3  # always print first N eval batches
+
+# Store batch fingerprints + losses for train/eval comparison
+_DEBUG_BATCH_LOG = {"train": {}, "eval": {}}
+
+
+def _should_debug_print():
+    """Return True if we should print debug info for the current step."""
+    if _DEBUG_STEP["in_eval"]:
+        idx = _DEBUG_STEP["eval_calls"]
+        return idx < _DEBUG_EVAL_FIRST_N or idx % _DEBUG_PRINT_EVERY == 0
+    step = _DEBUG_STEP["global"]
+    return step < _DEBUG_FIRST_N or step % _DEBUG_PRINT_EVERY == 0
+
+
+def _batch_fingerprint(input_ids, labels):
+    """Create a deterministic fingerprint of a batch for matching train vs eval."""
+    ids = input_ids.flatten()
+    labs = labels.flatten()
+    # Use first 8 + last 8 token ids, seq len, and label count as fingerprint
+    first = tuple(ids[:8].tolist())
+    last = tuple(ids[-8:].tolist())
+    seq_len = int(ids.shape[0])
+    n_labels = int((labs != -100).sum().item())
+    return f"len={seq_len}|labs={n_labels}|first={first}|last={last}"
+
+
+def _dbg(tag, msg):
+    """Debug print with step info."""
+    step = _DEBUG_STEP["global"]
+    print(f"[DEBUG step={step}][{tag}] {msg}", flush=True)
 
 
 def set_seed(seed: int):
@@ -137,9 +173,12 @@ class HypernetDataCollator:
 
     def __call__(self, examples):
         ex = examples[0]  # batch_size=1
+        call_idx = _DEBUG_STEP["collator_calls"]
+        _DEBUG_STEP["collator_calls"] += 1
 
         ctx = torch.tensor(ex["repo_embedding"], dtype=torch.float32).unsqueeze(0)  # [1, dim]
 
+        orig_len = len(ex["tokens"])
         tokens, labels = smart_truncate_keep_two_part_prefix(
             tokens=ex["tokens"],
             labels=ex["labels"],
@@ -150,6 +189,13 @@ class HypernetDataCollator:
         )
 
         attention_mask = [0 if t == self.pad_token_id else 1 for t in tokens]
+        n_label_tokens = sum(1 for l in labels if l != -100)
+
+        if _should_debug_print():
+            print(f"[DEBUG collator call={call_idx}] repo={ex.get('repo_name','?')!r}  "
+                  f"seq_len={orig_len}->{len(tokens)}  "
+                  f"prefix={ex['prefix_len']}  target={ex.get('target_len','?')}  "
+                  f"labels={n_label_tokens}  ctx_norm={ctx.norm().item():.4f}", flush=True)
 
         return {
             "repo_name": ex.get("repo_name", ""),
@@ -219,10 +265,21 @@ def inject_lora_weights(model: nn.Module, module_specs, hyper_out: Dict[str, Any
     Ashared, Bshared = hyper_out["A"], hyper_out["B"]
     named = dict(model.named_modules())
     device = next(model.parameters()).device
+    do_dbg = _should_debug_print()
+    n_injected = 0
+    a_norms, b_norms = [], []
     for full_name, _, t, _, _ in module_specs:
         A0 = Ashared[t][batch_index].to(device=device)  # [r, in_f]
         B0 = Bshared[t][batch_index].to(device=device)  # [out_f, r]
         named[full_name].set_lora_weights(A0, B0)
+        n_injected += 1
+        if do_dbg:
+            a_norms.append(A0.norm().item())
+            b_norms.append(B0.norm().item())
+    if do_dbg:
+        _dbg("inject_lora", f"injected {n_injected} modules  "
+             f"A_norm: min={min(a_norms):.6f} max={max(a_norms):.6f} mean={sum(a_norms)/len(a_norms):.6f}  "
+             f"B_norm: min={min(b_norms):.6f} max={max(b_norms):.6f} mean={sum(b_norms)/len(b_norms):.6f}")
 
 
 class Hypernetwork(nn.Module):
@@ -230,8 +287,9 @@ class Hypernetwork(nn.Module):
         super().__init__()
         self.rank = rank
         self.input_dim = input_dim
+        self.hidden_dim = hidden_dim 
 
-        self.ctx_norm = nn.LayerNorm(input_dim)
+        # self.ctx_norm = nn.LayerNorm(input_dim)
 
         self.trunk = nn.Sequential(
             nn.Linear(input_dim, hidden_dim),
@@ -255,15 +313,25 @@ class Hypernetwork(nn.Module):
         self.log_scale_B = nn.ParameterDict({t: nn.Parameter(torch.tensor(-3.5)) for t in self.types})
 
     def forward(self, ctx: torch.Tensor):
+        do_dbg = _should_debug_print()
+
         # ctx: [B, dim] or [B, K, dim] (if you later pass multiple ctx vectors)
         if ctx.dim() == 3:
             ctx = torch.max(ctx, dim=1).values
 
-        ctx = self.ctx_norm(ctx.float())
+        # ctx = self.ctx_norm(ctx.float())
+        
         h = self.trunk(ctx.float())
+        h = F.normalize(h, p=2, dim=-1) * math.sqrt(self.hidden_dim)
+
+        if do_dbg:
+            _dbg("Hypernet.fwd", f"ctx_normed={ctx.norm().item():.4f}  "
+                 f"trunk_h: norm={h.norm().item():.4f}  range=[{h.min().item():.4f},{h.max().item():.4f}]  "
+                 f"nan={torch.isnan(h).any().item()}")
 
         A = {}
         B = {}
+        any_nan = False
 
         for t in self.types:
             in_f, out_f = self.type_shapes[t]
@@ -276,6 +344,23 @@ class Hypernetwork(nn.Module):
             A[t] = torch.tanh(A_raw) * scale_A
             B[t] = torch.tanh(B_raw) * scale_B
 
+            if torch.isnan(A[t]).any() or torch.isnan(B[t]).any():
+                any_nan = True
+
+        if do_dbg:
+            # One compact summary line
+            scales = {t: (torch.exp(self.log_scale_A[t]).clamp(1e-5, 0.3).item(),
+                          torch.exp(self.log_scale_B[t]).clamp(1e-5, 0.3).item()) for t in self.types}
+            a_means = {t: A[t].abs().mean().item() for t in self.types}
+            b_means = {t: B[t].abs().mean().item() for t in self.types}
+            _dbg("Hypernet.fwd", f"scales={{{','.join(f'{t}:{s[0]:.4f}/{s[1]:.4f}' for t,s in scales.items())}}}  "
+                 f"A_abs_mean=[{min(a_means.values()):.6f}..{max(a_means.values()):.6f}]  "
+                 f"B_abs_mean=[{min(b_means.values()):.6f}..{max(b_means.values()):.6f}]  "
+                 f"nan={any_nan}")
+
+        if any_nan:
+            _dbg("Hypernet.fwd", "WARNING: NaN in A/B outputs!")
+
         return {"A": A, "B": B}
 
 
@@ -286,15 +371,35 @@ class HypernetTrainer(SFTTrainer):
         self._module_specs = module_specs
 
     def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+        # Determine if we're in train or eval mode
+        is_training = model.training
+        mode_str = "TRAIN" if is_training else "EVAL"
+        do_dbg = _should_debug_print()
+
         ctx = inputs["ctx"].to(device=model.device, dtype=torch.float32)
+        fingerprint = _batch_fingerprint(inputs["input_ids"], inputs["labels"])
+
+        if do_dbg:
+            _dbg("compute_loss", f"[{mode_str}] repo={inputs.get('repo_name','?')!r}  "
+                 f"batch_fingerprint={fingerprint}  "
+                 f"model.training={model.training}  hypernet.training={self.hypernet.training}  "
+                 f"ctx_raw_norm={ctx.norm().item():.4f}  "
+                 f"input_ids_shape={list(inputs['input_ids'].shape)}  "
+                 f"labels_non_masked={int((inputs['labels'] != -100).sum())}")
+            # Warn if hypernet mode doesn't match model mode
+            if model.training != self.hypernet.training:
+                _dbg("compute_loss", f"WARNING: mode mismatch! model.training={model.training} "
+                     f"but hypernet.training={self.hypernet.training}")
+
         ctx = F.normalize(ctx, p=2, dim=-1)
 
-        h = self.hypernet(ctx)
+        if do_dbg:
+            repo_name = inputs.get('repo_name', '?')
+            _dbg("compute_loss", f"[{mode_str}] ctx after L2-norm: repo={repo_name!r}  "
+                 f"norm={ctx.norm().item():.4f}  "
+                 f"min={ctx.min().item():.4f}  max={ctx.max().item():.4f}")
 
-        # for key in h["A"]:
-        #     if torch.isnan(h["A"][key]).any() or torch.isnan(h["B"][key]).any():
-        #         loss = torch.tensor(10.0, device=model.device, dtype=torch.float32)
-        #         return (loss, None) if return_outputs else loss
+        h = self.hypernet(ctx)
 
         inject_lora_weights(model, self._module_specs, h, batch_index=0)
 
@@ -304,12 +409,46 @@ class HypernetTrainer(SFTTrainer):
             labels=inputs["labels"].to(model.device),
         )
         loss = out["loss"] if isinstance(out, dict) else out[0]
-        # if torch.isnan(loss) or torch.isinf(loss):
-        #     loss = torch.tensor(10.0, device=model.device, dtype=torch.float32)
+
+        if do_dbg:
+            _dbg("compute_loss", f"[{mode_str}] loss={loss.item():.4f}  "
+                 f"is_nan={torch.isnan(loss).item()}  is_inf={torch.isinf(loss).item()}")
+
+        if torch.isnan(loss) or torch.isinf(loss):
+            _dbg("compute_loss", f"[{mode_str}] WARNING: loss is {'NaN' if torch.isnan(loss) else 'Inf'}!  "
+                 f"repo={inputs.get('repo_name','?')!r}")
+
+        # Record for train/eval comparison
+        record_key = "train" if is_training else "eval"
+        repo = inputs.get("repo_name", "?")
+        _DEBUG_BATCH_LOG[record_key][fingerprint] = {
+            "repo": repo,
+            "loss": loss.item(),
+            "mode": mode_str,
+            "hypernet_training": self.hypernet.training,
+        }
+
+        if not is_training:
+            _DEBUG_STEP["eval_calls"] += 1
+            # Check if we've seen this exact batch during training
+            if fingerprint in _DEBUG_BATCH_LOG["train"]:
+                train_rec = _DEBUG_BATCH_LOG["train"][fingerprint]
+                delta = loss.item() - train_rec["loss"]
+                _dbg("compute_loss", f"[COMPARE] Same batch seen in TRAIN!  "
+                     f"repo={repo!r}  train_loss={train_rec['loss']:.4f}  eval_loss={loss.item():.4f}  "
+                     f"delta={delta:+.4f}  "
+                     f"train_hypernet_mode={'train' if train_rec['hypernet_training'] else 'eval'}  "
+                     f"eval_hypernet_mode={'train' if self.hypernet.training else 'eval'}")
 
         return (loss, out) if return_outputs else loss
 
     def training_step(self, model, inputs, num_items_in_batch=None):
+        step = _DEBUG_STEP["global"]
+        do_dbg = _should_debug_print()
+
+        if do_dbg:
+            _dbg("training_step", f"=== START step={step} ===")
+
         model.train()
         inputs = self._prepare_inputs(inputs)
 
@@ -321,12 +460,100 @@ class HypernetTrainer(SFTTrainer):
 
         self.accelerator.backward(loss)
 
+        # Check gradient stats BEFORE clipping
+        if do_dbg:
+            grad_norms = []
+            n_no_grad = 0
+            n_nan_grad = 0
+            for name, p in self.hypernet.named_parameters():
+                if p.grad is not None:
+                    gn = p.grad.norm().item()
+                    grad_norms.append(gn)
+                    if torch.isnan(p.grad).any():
+                        n_nan_grad += 1
+                        _dbg("training_step", f"  NaN grad in param: {name}")
+                else:
+                    n_no_grad += 1
+            if grad_norms:
+                _dbg("training_step", f"PRE-clip grad norms: "
+                     f"min={min(grad_norms):.6f}  max={max(grad_norms):.6f}  "
+                     f"mean={sum(grad_norms)/len(grad_norms):.6f}  "
+                     f"n_params_with_grad={len(grad_norms)}  n_no_grad={n_no_grad}  n_nan_grad={n_nan_grad}")
+            else:
+                _dbg("training_step", "WARNING: No hypernet params have gradients!")
+
         if self.args.max_grad_norm is not None and self.args.max_grad_norm > 0:
-            torch.nn.utils.clip_grad_norm_(self.hypernet.parameters(), self.args.max_grad_norm)
+            total_norm = torch.nn.utils.clip_grad_norm_(self.hypernet.parameters(), self.args.max_grad_norm)
+            if do_dbg:
+                _dbg("training_step", f"POST-clip total_grad_norm={total_norm:.6f}  "
+                     f"max_grad_norm={self.args.max_grad_norm}")
 
-        return loss.detach()
+        if do_dbg:
+            # Check hypernet param stats
+            param_norms = {name: p.norm().item() for name, p in self.hypernet.named_parameters()}
+            max_pn = max(param_norms.values())
+            min_pn = min(param_norms.values())
+            mean_pn = sum(param_norms.values()) / len(param_norms)
+            _dbg("training_step", f"Hypernet param norms: min={min_pn:.6f}  max={max_pn:.6f}  mean={mean_pn:.6f}")
+            _dbg("training_step", f"=== END step={step}  loss={loss.item():.4f} ===\n")
+
+        _DEBUG_STEP["global"] += 1
+        return loss.detach() / self.args.gradient_accumulation_steps
 
 
+
+    def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix="eval"):
+        """Wrap evaluate to set hypernet to eval mode and log comparison."""
+        _DEBUG_STEP["eval_calls"] = 0
+        _DEBUG_STEP["in_eval"] = True
+        _DEBUG_BATCH_LOG["eval"] = {}
+
+        was_training = self.hypernet.training
+        self.hypernet.eval()
+        print(f"\n[DEBUG][evaluate] === EVAL START ===  "
+              f"hypernet set to eval mode (was training={was_training})  "
+              f"global_train_step={_DEBUG_STEP['global']}  "
+              f"metric_key_prefix={metric_key_prefix!r}", flush=True)
+
+        result = super().evaluate(eval_dataset=eval_dataset, ignore_keys=ignore_keys,
+                                  metric_key_prefix=metric_key_prefix)
+        _DEBUG_STEP["in_eval"] = False
+
+        # Print comparison summary
+        n_eval = len(_DEBUG_BATCH_LOG["eval"])
+        n_matched = sum(1 for fp in _DEBUG_BATCH_LOG["eval"] if fp in _DEBUG_BATCH_LOG["train"])
+        print(f"[DEBUG][evaluate] === EVAL END ===  "
+              f"eval_batches={n_eval}  matched_with_train={n_matched}", flush=True)
+
+        if n_matched > 0:
+            deltas = []
+            for fp in _DEBUG_BATCH_LOG["eval"]:
+                if fp in _DEBUG_BATCH_LOG["train"]:
+                    d = _DEBUG_BATCH_LOG["eval"][fp]["loss"] - _DEBUG_BATCH_LOG["train"][fp]["loss"]
+                    deltas.append(d)
+                    repo = _DEBUG_BATCH_LOG["eval"][fp]["repo"]
+                    print(f"[DEBUG][evaluate] MATCH repo={repo!r}  "
+                          f"train_loss={_DEBUG_BATCH_LOG['train'][fp]['loss']:.4f}  "
+                          f"eval_loss={_DEBUG_BATCH_LOG['eval'][fp]['loss']:.4f}  "
+                          f"delta={d:+.4f}", flush=True)
+            if deltas:
+                import numpy as np
+                print(f"[DEBUG][evaluate] MATCH SUMMARY: n={len(deltas)}  "
+                      f"mean_delta={np.mean(deltas):+.6f}  "
+                      f"std_delta={np.std(deltas):.6f}  "
+                      f"max_abs_delta={max(abs(d) for d in deltas):.6f}", flush=True)
+        else:
+            print(f"[DEBUG][evaluate] No overlapping batches between train and eval "
+                  f"(train has {len(_DEBUG_BATCH_LOG['train'])} recorded fingerprints)", flush=True)
+
+        print(f"[DEBUG][evaluate] result={result}", flush=True)
+
+        # Restore hypernet to training mode if it was before
+        if was_training:
+            self.hypernet.train()
+            print(f"[DEBUG][evaluate] hypernet restored to train mode", flush=True)
+
+        return result
 
     def _prepare_dataset(self, dataset, *args, **kwargs):
         return dataset
@@ -439,7 +666,7 @@ def main():
 
     ap.add_argument("--hidden-dim", type=int, default=512)
 
-    ap.add_argument("--grad-accum", type=int, default=8)
+    ap.add_argument("--grad-accum", type=int, default=1)
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--epochs", type=int, default=5)
     ap.add_argument("--eval-steps", type=int, default=500)
@@ -451,11 +678,21 @@ def main():
 
     set_seed(args.seed)
 
+    print("=" * 80)
+    print("[DEBUG] CONFIGURATION:")
+    for k, v in vars(args).items():
+        print(f"  {k}: {v}")
+    print("=" * 80, flush=True)
+
     wandb.init(project="hypernetwork-REPOPEFTDATA", name=args.output_dir.split("/")[-1])
 
     tok = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
+
+    print(f"[DEBUG] Tokenizer: vocab_size={tok.vocab_size}  "
+          f"pad_token_id={tok.pad_token_id}  eos_token_id={tok.eos_token_id}  "
+          f"bos_token_id={tok.bos_token_id}", flush=True)
 
     print("Loading frozen base model...")
     model = AutoModelForCausalLM.from_pretrained(
@@ -470,10 +707,23 @@ def main():
     if hasattr(model.config, "use_cache"):
         model.config.use_cache = False
 
+    total_params = sum(p.numel() for p in model.parameters())
+    frozen_params = sum(p.numel() for p in model.parameters() if not p.requires_grad)
+    print(f"[DEBUG] Base model: total_params={total_params:,}  frozen={frozen_params:,}  "
+          f"dtype={next(model.parameters()).dtype}  device={next(model.parameters()).device}", flush=True)
+
     target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "up_proj", "gate_proj", "down_proj"]
     specs = get_module_specs(model, target_modules)
     replace_with_lora(model, specs, r=args.rank, alpha=args.alpha)
     print(f"Replaced {len(specs)} modules with LoRA wrappers (rank={args.rank})")
+
+    # Print breakdown by module type
+    from collections import Counter
+    type_counts = Counter(s[2] for s in specs)
+    for mtype, cnt in sorted(type_counts.items()):
+        shape = next((s[3], s[4]) for s in specs if s[2] == mtype)
+        print(f"  [DEBUG] LoRA type={mtype}: count={cnt}  in_features={shape[0]}  out_features={shape[1]}")
+    print(f"  [DEBUG] LoRA alpha={args.alpha}  scale={float(args.alpha)/float(args.rank):.2f}", flush=True)
 
     emb_dir = Path(args.emb_dir).expanduser().resolve()
     emb = load_embeddings_dict(emb_dir)
@@ -487,9 +737,21 @@ def main():
     train_items = attach_embeddings(prepare_training_items(train_raw, tok), emb)
     val_items = attach_embeddings(prepare_training_items(val_raw, tok), emb)
     test_items = attach_embeddings(prepare_training_items(test_raw, tok), emb)
+    print(f"[DEBUG] After attach_embeddings: train={len(train_items)}  val={len(val_items)}  test={len(test_items)}")
 
     embedding_dim = len(train_items[0]["repo_embedding"])
     print(f"Embedding dim: {embedding_dim}")
+
+    # Print token length statistics
+    import numpy as np
+    for split_name, items in [("train", train_items), ("val", val_items), ("test", test_items)]:
+        if items:
+            lengths = [len(it["tokens"]) for it in items]
+            repos = set(it["repo"] for it in items)
+            print(f"[DEBUG] {split_name}: n_examples={len(items)}  n_unique_repos={len(repos)}  "
+                  f"seq_len: min={min(lengths)}  max={max(lengths)}  "
+                  f"mean={np.mean(lengths):.0f}  median={np.median(lengths):.0f}  "
+                  f">{args.max_seq_len}: {sum(1 for l in lengths if l > args.max_seq_len)}", flush=True)
 
     train_ds = to_hf_dataset(train_items, seed=args.seed, shuffle=True)
     val_ds = to_hf_dataset(val_items, seed=args.seed, shuffle=False)
@@ -509,7 +771,12 @@ def main():
         rank=args.rank,
     ).cuda()
 
-    print(f"Hypernet params: {sum(p.numel() for p in hypernet.parameters()):,}")
+    n_hypernet_params = sum(p.numel() for p in hypernet.parameters())
+    print(f"Hypernet params: {n_hypernet_params:,}")
+    print(f"[DEBUG] Hypernet architecture:")
+    for name, p in hypernet.named_parameters():
+        print(f"  {name}: shape={list(p.shape)}  numel={p.numel():,}  dtype={p.dtype}  device={p.device}")
+    print(f"[DEBUG] Hypernet memory: ~{n_hypernet_params * 4 / 1024**2:.1f} MB (fp32)", flush=True)
 
     sft_cfg = SFTConfig(
         dataset_text_field="text",
@@ -519,8 +786,8 @@ def main():
         per_device_train_batch_size=1,
         per_device_eval_batch_size=1,
         gradient_accumulation_steps=args.grad_accum,
-        learning_rate=2e-5,
-        weight_decay=0.0,
+        learning_rate=1e-4,
+        weight_decay=0.01,
         warmup_ratio=0.03,
         num_train_epochs=args.epochs,
         lr_scheduler_type="cosine",
@@ -535,11 +802,18 @@ def main():
         bf16=True,
         output_dir=args.output_dir,
         report_to="wandb",
-        max_grad_norm=0.3,
+        max_grad_norm=5.0,
         prediction_loss_only=True,
     )
 
-    opt = torch.optim.AdamW(hypernet.parameters(), lr=sft_cfg.learning_rate, weight_decay=sft_cfg.weight_decay)
+    # opt = torch.optim.AdamW(hypernet.parameters(), lr=sft_cfg.learning_rate, weight_decay=sft_cfg.weight_decay)
+    opt = torch.optim.AdamW(hypernet.parameters(), lr=sft_cfg.learning_rate, weight_decay=0.01)
+
+    print(f"[DEBUG] Optimizer: AdamW  lr={sft_cfg.learning_rate}  weight_decay={sft_cfg.weight_decay}")
+    print(f"[DEBUG] SFT config: batch_size=1  grad_accum={args.grad_accum}  effective_batch={args.grad_accum}  "
+          f"epochs={args.epochs}  max_grad_norm={sft_cfg.max_grad_norm}  bf16={sft_cfg.bf16}")
+    total_steps = len(train_items) * args.epochs // args.grad_accum
+    print(f"[DEBUG] Estimated total optimization steps: ~{total_steps}", flush=True)
     save_cb = SaveHypernetCallback(hypernet, specs)
 
     trainer = HypernetTrainer(
@@ -557,13 +831,18 @@ def main():
     print("\nInitial eval...")
     model.eval()
     init_val = trainer.evaluate()
-    print("init_val_loss =", init_val["eval_loss"])
+    print(f"init_val_loss = {init_val['eval_loss']}")
+    print(f"[DEBUG] Full init eval metrics: {init_val}", flush=True)
     wandb.log({"init_val_loss": init_val["eval_loss"]})
 
-
+    # Reset debug step counter for training
+    _DEBUG_STEP["global"] = 0
+    print(f"\n[DEBUG] Starting training. Debug prints every {_DEBUG_PRINT_EVERY} steps "
+          f"(always first {_DEBUG_FIRST_N} steps)", flush=True)
     print("\nTraining...")
     trainer.train()
 
+    print(f"\n[DEBUG] Training complete. Total steps executed: {_DEBUG_STEP['global']}", flush=True)
 
     print("\nFinal eval...")
     final_val = trainer.evaluate()

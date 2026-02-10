@@ -1,0 +1,394 @@
+#!/usr/bin/env python3
+"""
+Visualize training pairs from a test_next_block JSONL file.
+Produces an interactive HTML report with:
+  - Summary statistics (repos, frameworks, test types, length distributions)
+  - Browsable, syntax-highlighted prefix → target pairs
+  - Filtering and search
+
+Usage:
+    python visualize_pairs.py <path_to_jsonl> [--max-samples N] [--output report.html]
+"""
+
+import argparse
+import html
+import json
+import os
+import statistics
+from collections import Counter
+
+
+def load_data(path, max_lines=None):
+    records = []
+    with open(path, "r") as f:
+        for i, line in enumerate(f):
+            if max_lines and i >= max_lines:
+                break
+            records.append(json.loads(line))
+    return records
+
+
+def compute_stats(records):
+    stats = {}
+    stats["total"] = len(records)
+
+    # Repos
+    repo_counts = Counter(r["repo"] for r in records)
+    stats["num_repos"] = len(repo_counts)
+    stats["top_repos"] = repo_counts.most_common(20)
+
+    # Frameworks
+    fw_counts = Counter(r.get("framework", "unknown") for r in records)
+    stats["frameworks"] = fw_counts.most_common()
+
+    # Test types
+    tt_counts = Counter()
+    for r in records:
+        for t in r.get("test_type", []):
+            tt_counts[t] += 1
+    stats["test_types"] = tt_counts.most_common()
+
+    # Cut kinds
+    ck_counts = Counter(r.get("metadata", {}).get("cut_kind", "unknown") for r in records)
+    stats["cut_kinds"] = ck_counts.most_common()
+
+    # Prefix / target lengths (in characters and lines)
+    prefix_chars = [len(r.get("prefix", "")) for r in records]
+    target_chars = [len(r.get("target", "")) for r in records]
+    prefix_lines = [r.get("prefix", "").count("\n") + 1 for r in records]
+    target_lines = [r.get("target", "").count("\n") + 1 for r in records]
+
+    stats["prefix_chars"] = {
+        "min": min(prefix_chars), "max": max(prefix_chars),
+        "mean": statistics.mean(prefix_chars), "median": statistics.median(prefix_chars),
+    }
+    stats["target_chars"] = {
+        "min": min(target_chars), "max": max(target_chars),
+        "mean": statistics.mean(target_chars), "median": statistics.median(target_chars),
+    }
+    stats["prefix_lines"] = {
+        "min": min(prefix_lines), "max": max(prefix_lines),
+        "mean": statistics.mean(prefix_lines), "median": statistics.median(prefix_lines),
+    }
+    stats["target_lines"] = {
+        "min": min(target_lines), "max": max(target_lines),
+        "mean": statistics.mean(target_lines), "median": statistics.median(target_lines),
+    }
+
+    # prefix_trimmed ratio
+    trimmed = sum(1 for r in records if r.get("metadata", {}).get("prefix_trimmed", False))
+    stats["prefix_trimmed_count"] = trimmed
+    stats["prefix_trimmed_pct"] = 100.0 * trimmed / len(records) if records else 0
+
+    return stats
+
+
+def make_bar(items, max_bar_width=300):
+    """Generate an HTML horizontal bar chart from (label, count) pairs."""
+    if not items:
+        return ""
+    max_val = max(v for _, v in items)
+    rows = []
+    for label, count in items:
+        width = int(max_bar_width * count / max_val) if max_val else 0
+        rows.append(
+            f'<div class="bar-row">'
+            f'<span class="bar-label">{html.escape(str(label))}</span>'
+            f'<div class="bar" style="width:{width}px"></div>'
+            f'<span class="bar-value">{count}</span>'
+            f'</div>'
+        )
+    return "\n".join(rows)
+
+
+def make_stat_table(d):
+    return (
+        f'<table class="stat-table">'
+        f'<tr><th>Min</th><th>Max</th><th>Mean</th><th>Median</th></tr>'
+        f'<tr><td>{d["min"]}</td><td>{d["max"]}</td>'
+        f'<td>{d["mean"]:.1f}</td><td>{d["median"]:.1f}</td></tr>'
+        f'</table>'
+    )
+
+
+def generate_html(records, stats, max_display=200):
+    """Generate a self-contained HTML report."""
+
+    # Build sample cards (limit display count for performance)
+    display_records = records[:max_display]
+    sample_cards = []
+    for i, r in enumerate(display_records):
+        meta = r.get("metadata", {})
+        prefix_code = html.escape(r.get("prefix", ""))
+        target_code = html.escape(r.get("target", ""))
+        # Show last N lines of prefix for readability
+        prefix_full = r.get("prefix", "")
+        prefix_lines_list = prefix_full.split("\n")
+        if len(prefix_lines_list) > 30:
+            prefix_short = "\n".join(
+                ["... (truncated, showing last 30 lines) ...", ""] + prefix_lines_list[-30:]
+            )
+        else:
+            prefix_short = prefix_full
+
+        card = f"""
+        <div class="card" data-repo="{html.escape(r.get('repo',''))}"
+             data-framework="{html.escape(r.get('framework',''))}"
+             data-idx="{i}">
+          <div class="card-header" onclick="toggleCard(this)">
+            <span class="card-num">#{i+1}</span>
+            <span class="card-repo">{html.escape(r.get('repo',''))}</span>
+            <span class="card-file">{html.escape(meta.get('file',''))}</span>
+            <span class="card-func">{html.escape(str(meta.get('function','') or ''))}</span>
+            <span class="card-cut">{html.escape(meta.get('cut_kind',''))} @ line {meta.get('cut_line','?')}</span>
+            <span class="card-fw badge">{html.escape(r.get('framework',''))}</span>
+            <span class="card-toggle">&#9660;</span>
+          </div>
+          <div class="card-body" style="display:none;">
+            <div class="pair-container">
+              <div class="pair-section prefix-section">
+                <div class="section-label">PREFIX (input)</div>
+                <pre><code>{html.escape(prefix_short)}</code></pre>
+                {"<details><summary>Show full prefix (" + str(len(prefix_lines_list)) + " lines)</summary><pre><code>" + prefix_code + "</code></pre></details>" if len(prefix_lines_list) > 30 else ""}
+              </div>
+              <div class="arrow">&#10142;</div>
+              <div class="pair-section target-section">
+                <div class="section-label">TARGET (expected output)</div>
+                <pre><code>{target_code}</code></pre>
+              </div>
+            </div>
+            <div class="meta-info">
+              <span><b>Test types:</b> {', '.join(r.get('test_type', []))}</span>
+              <span><b>Prefix trimmed:</b> {meta.get('prefix_trimmed', False)}</span>
+              <span><b>Prefix:</b> {len(r.get('prefix',''))} chars, {r.get('prefix','').count(chr(10))+1} lines</span>
+              <span><b>Target:</b> {len(r.get('target',''))} chars, {r.get('target','').count(chr(10))+1} lines</span>
+            </div>
+          </div>
+        </div>
+        """
+        sample_cards.append(card)
+
+    samples_html = "\n".join(sample_cards)
+
+    report = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Training Pairs Visualization — test_next_block</title>
+<style>
+  :root {{
+    --bg: #0d1117; --card-bg: #161b22; --border: #30363d;
+    --text: #c9d1d9; --text-dim: #8b949e; --accent: #58a6ff;
+    --prefix-bg: #1c2128; --target-bg: #0f1a0f;
+    --target-border: #2ea04370; --prefix-border: #58a6ff40;
+    --badge-bg: #1f6feb30; --badge-text: #58a6ff;
+  }}
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ font-family: -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
+         background: var(--bg); color: var(--text); padding: 20px; line-height: 1.5; }}
+  h1 {{ color: #f0f6fc; margin-bottom: 5px; font-size: 1.6em; }}
+  h2 {{ color: var(--accent); margin: 25px 0 10px; font-size: 1.2em; border-bottom: 1px solid var(--border); padding-bottom: 5px; }}
+  .subtitle {{ color: var(--text-dim); margin-bottom: 20px; font-size: 0.95em; }}
+
+  /* Stats */
+  .stats-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; margin-bottom: 30px; }}
+  .stats-card {{ background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }}
+  .stats-card h3 {{ color: var(--accent); font-size: 1em; margin-bottom: 10px; }}
+  .stat-table {{ border-collapse: collapse; width: 100%; }}
+  .stat-table th, .stat-table td {{ text-align: left; padding: 4px 10px; border-bottom: 1px solid var(--border); font-size: 0.9em; }}
+  .stat-table th {{ color: var(--text-dim); font-weight: 600; }}
+
+  .bar-row {{ display: flex; align-items: center; margin: 3px 0; font-size: 0.85em; }}
+  .bar-label {{ width: 220px; text-align: right; padding-right: 10px; color: var(--text-dim);
+                white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+  .bar {{ height: 16px; background: linear-gradient(90deg, #1f6feb, #58a6ff); border-radius: 3px; min-width: 2px; }}
+  .bar-value {{ padding-left: 8px; color: var(--text); font-weight: 500; }}
+
+  /* Filter bar */
+  .filter-bar {{ background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px;
+                 padding: 12px 16px; margin-bottom: 16px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }}
+  .filter-bar label {{ color: var(--text-dim); font-size: 0.9em; }}
+  .filter-bar select, .filter-bar input {{ background: var(--bg); color: var(--text); border: 1px solid var(--border);
+                                           border-radius: 4px; padding: 5px 8px; font-size: 0.9em; }}
+
+  /* Cards */
+  .card {{ background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px;
+           transition: border-color 0.2s; }}
+  .card:hover {{ border-color: var(--accent); }}
+  .card-header {{ display: flex; align-items: center; gap: 10px; padding: 10px 16px; cursor: pointer;
+                  flex-wrap: wrap; font-size: 0.88em; }}
+  .card-num {{ color: var(--text-dim); font-weight: 700; min-width: 40px; }}
+  .card-repo {{ color: var(--accent); font-weight: 600; }}
+  .card-file {{ color: var(--text-dim); }}
+  .card-func {{ color: #d2a8ff; }}
+  .card-cut {{ color: var(--text-dim); font-size: 0.85em; }}
+  .card-toggle {{ margin-left: auto; color: var(--text-dim); transition: transform 0.2s; }}
+  .card.open .card-toggle {{ transform: rotate(180deg); }}
+  .badge {{ background: var(--badge-bg); color: var(--badge-text); padding: 2px 8px; border-radius: 10px; font-size: 0.8em; }}
+
+  .card-body {{ padding: 0 16px 16px; }}
+  .pair-container {{ display: flex; gap: 12px; align-items: flex-start; }}
+  .arrow {{ font-size: 2em; color: var(--accent); padding-top: 30px; flex-shrink: 0; }}
+  .pair-section {{ flex: 1; min-width: 0; }}
+  .prefix-section pre {{ background: var(--prefix-bg); border: 1px solid var(--prefix-border); }}
+  .target-section pre {{ background: var(--target-bg); border: 1px solid var(--target-border); }}
+  .section-label {{ font-size: 0.8em; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em;
+                    margin-bottom: 6px; }}
+  .prefix-section .section-label {{ color: #58a6ff; }}
+  .target-section .section-label {{ color: #3fb950; }}
+  pre {{ padding: 12px; border-radius: 6px; overflow-x: auto; font-size: 0.82em; line-height: 1.45;
+         max-height: 400px; overflow-y: auto; }}
+  code {{ font-family: 'Fira Code', 'Cascadia Code', 'JetBrains Mono', Consolas, monospace; }}
+  details {{ margin-top: 6px; }}
+  details summary {{ color: var(--accent); cursor: pointer; font-size: 0.85em; }}
+  .meta-info {{ display: flex; gap: 18px; flex-wrap: wrap; margin-top: 10px; font-size: 0.82em; color: var(--text-dim); }}
+
+  @media (max-width: 900px) {{
+    .pair-container {{ flex-direction: column; }}
+    .arrow {{ transform: rotate(90deg); padding: 0; text-align: center; }}
+  }}
+</style>
+</head>
+<body>
+
+<h1>Training Pairs Visualization</h1>
+<p class="subtitle">Task: <b>test_next_block</b> &mdash; {stats['total']:,} total pairs, {stats['num_repos']} repos</p>
+
+<h2>Summary Statistics</h2>
+<div class="stats-grid">
+  <div class="stats-card">
+    <h3>Top Repositories ({stats['num_repos']} total)</h3>
+    {make_bar(stats['top_repos'])}
+  </div>
+  <div class="stats-card">
+    <h3>Frameworks</h3>
+    {make_bar(stats['frameworks'])}
+  </div>
+  <div class="stats-card">
+    <h3>Test Types</h3>
+    {make_bar(stats['test_types'])}
+  </div>
+  <div class="stats-card">
+    <h3>Cut Kinds</h3>
+    {make_bar(stats['cut_kinds'])}
+  </div>
+  <div class="stats-card">
+    <h3>Prefix Length (characters)</h3>
+    {make_stat_table(stats['prefix_chars'])}
+    <h3 style="margin-top:12px">Prefix Length (lines)</h3>
+    {make_stat_table(stats['prefix_lines'])}
+  </div>
+  <div class="stats-card">
+    <h3>Target Length (characters)</h3>
+    {make_stat_table(stats['target_chars'])}
+    <h3 style="margin-top:12px">Target Length (lines)</h3>
+    {make_stat_table(stats['target_lines'])}
+  </div>
+  <div class="stats-card">
+    <h3>Prefix Trimming</h3>
+    <p>{stats['prefix_trimmed_count']:,} / {stats['total']:,} prefixes were trimmed ({stats['prefix_trimmed_pct']:.1f}%)</p>
+  </div>
+</div>
+
+<h2>Training Pairs (showing {min(max_display, len(records)):,} of {stats['total']:,})</h2>
+
+<div class="filter-bar">
+  <label>Filter repo:</label>
+  <select id="repoFilter" onchange="filterCards()">
+    <option value="">All repos</option>
+  </select>
+  <label>Framework:</label>
+  <select id="fwFilter" onchange="filterCards()">
+    <option value="">All</option>
+  </select>
+  <label>Search:</label>
+  <input id="searchBox" type="text" placeholder="Search in code..." oninput="filterCards()">
+  <button onclick="expandAll()" style="background:var(--bg);color:var(--accent);border:1px solid var(--border);
+          border-radius:4px;padding:5px 10px;cursor:pointer;">Expand All</button>
+  <button onclick="collapseAll()" style="background:var(--bg);color:var(--accent);border:1px solid var(--border);
+          border-radius:4px;padding:5px 10px;cursor:pointer;">Collapse All</button>
+</div>
+
+<div id="cards">
+{samples_html}
+</div>
+
+<script>
+// Populate filter dropdowns
+const cards = document.querySelectorAll('.card');
+const repos = new Set(), fws = new Set();
+cards.forEach(c => {{ repos.add(c.dataset.repo); fws.add(c.dataset.framework); }});
+const repoSel = document.getElementById('repoFilter');
+[...repos].sort().forEach(r => {{ const o = document.createElement('option'); o.value = r; o.textContent = r; repoSel.appendChild(o); }});
+const fwSel = document.getElementById('fwFilter');
+[...fws].sort().forEach(f => {{ const o = document.createElement('option'); o.value = f; o.textContent = f; fwSel.appendChild(o); }});
+
+function toggleCard(header) {{
+  const card = header.parentElement;
+  const body = card.querySelector('.card-body');
+  if (body.style.display === 'none') {{ body.style.display = 'block'; card.classList.add('open'); }}
+  else {{ body.style.display = 'none'; card.classList.remove('open'); }}
+}}
+
+function filterCards() {{
+  const repo = repoSel.value.toLowerCase();
+  const fw = fwSel.value.toLowerCase();
+  const search = document.getElementById('searchBox').value.toLowerCase();
+  cards.forEach(c => {{
+    const matchRepo = !repo || c.dataset.repo.toLowerCase() === repo;
+    const matchFw = !fw || c.dataset.framework.toLowerCase() === fw;
+    const matchSearch = !search || c.textContent.toLowerCase().includes(search);
+    c.style.display = (matchRepo && matchFw && matchSearch) ? '' : 'none';
+  }});
+}}
+
+function expandAll() {{ cards.forEach(c => {{ c.querySelector('.card-body').style.display = 'block'; c.classList.add('open'); }}); }}
+function collapseAll() {{ cards.forEach(c => {{ c.querySelector('.card-body').style.display = 'none'; c.classList.remove('open'); }}); }}
+</script>
+
+</body>
+</html>"""
+    return report
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Visualize test_next_block training pairs")
+    parser.add_argument("jsonl_path", help="Path to the JSONL file")
+    parser.add_argument("--max-samples", type=int, default=200,
+                        help="Max number of sample pairs to display in the report (default: 200)")
+    parser.add_argument("--framework", type=str, default=None,
+                        help="Filter to only include pairs with this framework (e.g. pytest)")
+    parser.add_argument("--output", "-o", default=None,
+                        help="Output HTML file path (default: <input_name>_report.html)")
+    args = parser.parse_args()
+
+    print(f"Loading data from {args.jsonl_path} ...")
+    records = load_data(args.jsonl_path)
+    print(f"  Loaded {len(records):,} records.")
+
+    if args.framework:
+        records = [r for r in records if r.get("framework", "").lower() == args.framework.lower()]
+        print(f"  Filtered to framework='{args.framework}': {len(records):,} records remain.")
+
+    print("Computing statistics ...")
+    stats = compute_stats(records)
+
+    print("Generating HTML report ...")
+    report_html = generate_html(records, stats, max_display=args.max_samples)
+
+    if args.output:
+        out_path = args.output
+    else:
+        base = os.path.splitext(os.path.basename(args.jsonl_path))[0]
+        # Default to /tmp to avoid disk quota issues on shared filesystems
+        out_path = os.path.join("/tmp", f"{base}_report.html")
+
+    with open(out_path, "w") as f:
+        f.write(report_html)
+    print(f"Report saved to: {out_path}")
+    print(f"Open it in a browser:  firefox {out_path}")
+
+
+if __name__ == "__main__":
+    main()
