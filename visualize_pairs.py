@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-Visualize training pairs from a test_next_block JSONL file.
+Visualize Q&A pairs from create_qnas.py (QNA_HYPERNET.json).
 Produces an interactive HTML report with:
-  - Summary statistics (repos, frameworks, test types, length distributions)
+  - Summary statistics (repos, assertion types, length distributions)
   - Browsable, syntax-highlighted prefix → target pairs
   - Filtering and search
 
 Usage:
-    python visualize_pairs.py <path_to_jsonl> [--max-samples N] [--output report.html]
+    python visualize_pairs.py [--repos-dir DIR] [--output report.html]   # all repos with QNA
+    python visualize_pairs.py --qna path/to/QNA_HYPERNET.json [--output report.html]
+    python visualize_pairs.py --repo owner/repo_name [--repos-dir DIR] [--output report.html]
 """
 
 import argparse
@@ -17,8 +19,56 @@ import os
 import statistics
 from collections import Counter
 
+# Default repos dir (must match create_qnas.py)
+REPOSITORIES_DIR = "/home/lhotsko/scratch/REPO_DATASET/repositories"
+QNA_HYPERNET = "QNA_HYPERNET.json"
 
-def load_data(path, max_lines=None):
+
+def iter_repos_with_qna(repos_root: str):
+    """Yield (author, repo_name, qna_path) for repos that have QNA_HYPERNET.json."""
+    if not os.path.isdir(repos_root):
+        return
+    for author in os.listdir(repos_root):
+        author_path = os.path.join(repos_root, author)
+        if not os.path.isdir(author_path):
+            continue
+        for repo_name in os.listdir(author_path):
+            repo_path = os.path.join(author_path, repo_name)
+            qna_path = os.path.join(repo_path, QNA_HYPERNET)
+            if os.path.isfile(qna_path):
+                yield author, repo_name, qna_path
+
+
+def load_qna_json(path: str) -> list[dict]:
+    """Load pairs from a QNA_HYPERNET.json file."""
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    pairs = data.get("pairs", [])
+    repo = data.get("repo", "")
+    # Normalize to flat records for visualize_pairs
+    records = []
+    for p in pairs:
+        meta = p.get("metadata", {})
+        records.append({
+            "prefix": p.get("prefix", ""),
+            "target": p.get("target", ""),
+            "repo": meta.get("repo", repo),
+            "assertion_type": p.get("assertion_type", "unknown"),
+            "metadata": {
+                "file": meta.get("file", ""),
+                "function": meta.get("test_function", ""),
+                "cut_line": meta.get("lineno", ""),
+                "cut_kind": p.get("assertion_type", ""),
+                "was_multiline": meta.get("was_multiline", False),
+            },
+        })
+    return records
+
+
+def load_data(path: str, max_lines: int | None = None) -> list[dict]:
+    """Load from JSONL (legacy) or QNA JSON. For JSONL, max_lines limits."""
+    if path.endswith(".json"):
+        return load_qna_json(path)
     records = []
     with open(path, "r") as f:
         for i, line in enumerate(f):
@@ -28,7 +78,7 @@ def load_data(path, max_lines=None):
     return records
 
 
-def compute_stats(records):
+def compute_stats(records: list[dict]) -> dict:
     stats = {}
     stats["total"] = len(records)
 
@@ -37,20 +87,9 @@ def compute_stats(records):
     stats["num_repos"] = len(repo_counts)
     stats["top_repos"] = repo_counts.most_common(20)
 
-    # Frameworks
-    fw_counts = Counter(r.get("framework", "unknown") for r in records)
-    stats["frameworks"] = fw_counts.most_common()
-
-    # Test types
-    tt_counts = Counter()
-    for r in records:
-        for t in r.get("test_type", []):
-            tt_counts[t] += 1
-    stats["test_types"] = tt_counts.most_common()
-
-    # Cut kinds
-    ck_counts = Counter(r.get("metadata", {}).get("cut_kind", "unknown") for r in records)
-    stats["cut_kinds"] = ck_counts.most_common()
+    # Assertion types (from create_qnas)
+    at_counts = Counter(r.get("assertion_type", "unknown") for r in records)
+    stats["assertion_types"] = at_counts.most_common()
 
     # Prefix / target lengths (in characters and lines)
     prefix_chars = [len(r.get("prefix", "")) for r in records]
@@ -75,15 +114,15 @@ def compute_stats(records):
         "mean": statistics.mean(target_lines), "median": statistics.median(target_lines),
     }
 
-    # prefix_trimmed ratio
-    trimmed = sum(1 for r in records if r.get("metadata", {}).get("prefix_trimmed", False))
-    stats["prefix_trimmed_count"] = trimmed
-    stats["prefix_trimmed_pct"] = 100.0 * trimmed / len(records) if records else 0
+    # Multiline
+    multiline = sum(1 for r in records if r.get("metadata", {}).get("was_multiline", False))
+    stats["multiline_count"] = multiline
+    stats["multiline_pct"] = 100.0 * multiline / len(records) if records else 0
 
     return stats
 
 
-def make_bar(items, max_bar_width=300):
+def make_bar(items: list, max_bar_width: int = 300) -> str:
     """Generate an HTML horizontal bar chart from (label, count) pairs."""
     if not items:
         return ""
@@ -101,7 +140,7 @@ def make_bar(items, max_bar_width=300):
     return "\n".join(rows)
 
 
-def make_stat_table(d):
+def make_stat_table(d: dict) -> str:
     return (
         f'<table class="stat-table">'
         f'<tr><th>Min</th><th>Max</th><th>Mean</th><th>Median</th></tr>'
@@ -111,17 +150,15 @@ def make_stat_table(d):
     )
 
 
-def generate_html(records, stats, max_display=200):
+def generate_html(records: list[dict], stats: dict, max_display: int = 200) -> str:
     """Generate a self-contained HTML report."""
 
-    # Build sample cards (limit display count for performance)
     display_records = records[:max_display]
     sample_cards = []
     for i, r in enumerate(display_records):
         meta = r.get("metadata", {})
         prefix_code = html.escape(r.get("prefix", ""))
         target_code = html.escape(r.get("target", ""))
-        # Show last N lines of prefix for readability
         prefix_full = r.get("prefix", "")
         prefix_lines_list = prefix_full.split("\n")
         if len(prefix_lines_list) > 30:
@@ -133,15 +170,15 @@ def generate_html(records, stats, max_display=200):
 
         card = f"""
         <div class="card" data-repo="{html.escape(r.get('repo',''))}"
-             data-framework="{html.escape(r.get('framework',''))}"
+             data-assertion-type="{html.escape(r.get('assertion_type',''))}"
              data-idx="{i}">
           <div class="card-header" onclick="toggleCard(this)">
             <span class="card-num">#{i+1}</span>
             <span class="card-repo">{html.escape(r.get('repo',''))}</span>
             <span class="card-file">{html.escape(meta.get('file',''))}</span>
             <span class="card-func">{html.escape(str(meta.get('function','') or ''))}</span>
-            <span class="card-cut">{html.escape(meta.get('cut_kind',''))} @ line {meta.get('cut_line','?')}</span>
-            <span class="card-fw badge">{html.escape(r.get('framework',''))}</span>
+            <span class="card-cut">{html.escape(r.get('assertion_type',''))} @ line {meta.get('cut_line','?')}</span>
+            <span class="card-fw badge">{html.escape(r.get('assertion_type',''))}</span>
             <span class="card-toggle">&#9660;</span>
           </div>
           <div class="card-body" style="display:none;">
@@ -158,8 +195,8 @@ def generate_html(records, stats, max_display=200):
               </div>
             </div>
             <div class="meta-info">
-              <span><b>Test types:</b> {', '.join(r.get('test_type', []))}</span>
-              <span><b>Prefix trimmed:</b> {meta.get('prefix_trimmed', False)}</span>
+              <span><b>Assertion type:</b> {html.escape(r.get('assertion_type',''))}</span>
+              <span><b>Was multiline:</b> {meta.get('was_multiline', False)}</span>
               <span><b>Prefix:</b> {len(r.get('prefix',''))} chars, {r.get('prefix','').count(chr(10))+1} lines</span>
               <span><b>Target:</b> {len(r.get('target',''))} chars, {r.get('target','').count(chr(10))+1} lines</span>
             </div>
@@ -175,7 +212,7 @@ def generate_html(records, stats, max_display=200):
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Training Pairs Visualization — test_next_block</title>
+<title>Q&A Pairs Visualization — create_qnas</title>
 <style>
   :root {{
     --bg: #0d1117; --card-bg: #161b22; --border: #30363d;
@@ -191,7 +228,6 @@ def generate_html(records, stats, max_display=200):
   h2 {{ color: var(--accent); margin: 25px 0 10px; font-size: 1.2em; border-bottom: 1px solid var(--border); padding-bottom: 5px; }}
   .subtitle {{ color: var(--text-dim); margin-bottom: 20px; font-size: 0.95em; }}
 
-  /* Stats */
   .stats-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px; margin-bottom: 30px; }}
   .stats-card {{ background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }}
   .stats-card h3 {{ color: var(--accent); font-size: 1em; margin-bottom: 10px; }}
@@ -205,14 +241,12 @@ def generate_html(records, stats, max_display=200):
   .bar {{ height: 16px; background: linear-gradient(90deg, #1f6feb, #58a6ff); border-radius: 3px; min-width: 2px; }}
   .bar-value {{ padding-left: 8px; color: var(--text); font-weight: 500; }}
 
-  /* Filter bar */
   .filter-bar {{ background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px;
                  padding: 12px 16px; margin-bottom: 16px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }}
   .filter-bar label {{ color: var(--text-dim); font-size: 0.9em; }}
   .filter-bar select, .filter-bar input {{ background: var(--bg); color: var(--text); border: 1px solid var(--border);
                                            border-radius: 4px; padding: 5px 8px; font-size: 0.9em; }}
 
-  /* Cards */
   .card {{ background: var(--card-bg); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px;
            transition: border-color 0.2s; }}
   .card:hover {{ border-color: var(--accent); }}
@@ -252,26 +286,18 @@ def generate_html(records, stats, max_display=200):
 </head>
 <body>
 
-<h1>Training Pairs Visualization</h1>
-<p class="subtitle">Task: <b>test_next_block</b> &mdash; {stats['total']:,} total pairs, {stats['num_repos']} repos</p>
+<h1>Q&A Pairs Visualization</h1>
+<p class="subtitle">From <b>create_qnas.py</b> &mdash; {stats['total']:,} pairs, {stats['num_repos']} repo(s)</p>
 
 <h2>Summary Statistics</h2>
 <div class="stats-grid">
   <div class="stats-card">
-    <h3>Top Repositories ({stats['num_repos']} total)</h3>
+    <h3>Repositories ({stats['num_repos']} total)</h3>
     {make_bar(stats['top_repos'])}
   </div>
   <div class="stats-card">
-    <h3>Frameworks</h3>
-    {make_bar(stats['frameworks'])}
-  </div>
-  <div class="stats-card">
-    <h3>Test Types</h3>
-    {make_bar(stats['test_types'])}
-  </div>
-  <div class="stats-card">
-    <h3>Cut Kinds</h3>
-    {make_bar(stats['cut_kinds'])}
+    <h3>Assertion Types</h3>
+    {make_bar(stats['assertion_types'])}
   </div>
   <div class="stats-card">
     <h3>Prefix Length (characters)</h3>
@@ -286,8 +312,8 @@ def generate_html(records, stats, max_display=200):
     {make_stat_table(stats['target_lines'])}
   </div>
   <div class="stats-card">
-    <h3>Prefix Trimming</h3>
-    <p>{stats['prefix_trimmed_count']:,} / {stats['total']:,} prefixes were trimmed ({stats['prefix_trimmed_pct']:.1f}%)</p>
+    <h3>Multiline Targets</h3>
+    <p>{stats['multiline_count']:,} / {stats['total']:,} targets were multiline ({stats['multiline_pct']:.1f}%)</p>
   </div>
 </div>
 
@@ -298,8 +324,8 @@ def generate_html(records, stats, max_display=200):
   <select id="repoFilter" onchange="filterCards()">
     <option value="">All repos</option>
   </select>
-  <label>Framework:</label>
-  <select id="fwFilter" onchange="filterCards()">
+  <label>Assertion type:</label>
+  <select id="typeFilter" onchange="filterCards()">
     <option value="">All</option>
   </select>
   <label>Search:</label>
@@ -315,14 +341,13 @@ def generate_html(records, stats, max_display=200):
 </div>
 
 <script>
-// Populate filter dropdowns
 const cards = document.querySelectorAll('.card');
-const repos = new Set(), fws = new Set();
-cards.forEach(c => {{ repos.add(c.dataset.repo); fws.add(c.dataset.framework); }});
+const repos = new Set(), types = new Set();
+cards.forEach(c => {{ repos.add(c.dataset.repo); types.add(c.dataset.assertionType); }});
 const repoSel = document.getElementById('repoFilter');
 [...repos].sort().forEach(r => {{ const o = document.createElement('option'); o.value = r; o.textContent = r; repoSel.appendChild(o); }});
-const fwSel = document.getElementById('fwFilter');
-[...fws].sort().forEach(f => {{ const o = document.createElement('option'); o.value = f; o.textContent = f; fwSel.appendChild(o); }});
+const typeSel = document.getElementById('typeFilter');
+[...types].sort().forEach(t => {{ const o = document.createElement('option'); o.value = t; o.textContent = t; typeSel.appendChild(o); }});
 
 function toggleCard(header) {{
   const card = header.parentElement;
@@ -333,13 +358,13 @@ function toggleCard(header) {{
 
 function filterCards() {{
   const repo = repoSel.value.toLowerCase();
-  const fw = fwSel.value.toLowerCase();
+  const type = typeSel.value.toLowerCase();
   const search = document.getElementById('searchBox').value.toLowerCase();
   cards.forEach(c => {{
     const matchRepo = !repo || c.dataset.repo.toLowerCase() === repo;
-    const matchFw = !fw || c.dataset.framework.toLowerCase() === fw;
+    const matchType = !type || c.dataset.assertionType.toLowerCase() === type;
     const matchSearch = !search || c.textContent.toLowerCase().includes(search);
-    c.style.display = (matchRepo && matchFw && matchSearch) ? '' : 'none';
+    c.style.display = (matchRepo && matchType && matchSearch) ? '' : 'none';
   }});
 }}
 
@@ -353,42 +378,122 @@ function collapseAll() {{ cards.forEach(c => {{ c.querySelector('.card-body').st
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Visualize test_next_block training pairs")
-    parser.add_argument("jsonl_path", help="Path to the JSONL file")
-    parser.add_argument("--max-samples", type=int, default=200,
-                        help="Max number of sample pairs to display in the report (default: 200)")
-    parser.add_argument("--framework", type=str, default=None,
-                        help="Filter to only include pairs with this framework (e.g. pytest)")
-    parser.add_argument("--output", "-o", default=None,
-                        help="Output HTML file path (default: <input_name>_report.html)")
+    parser = argparse.ArgumentParser(
+        description="Visualize Q&A pairs from create_qnas.py (QNA_HYPERNET.json)"
+    )
+    parser.add_argument(
+        "--qna",
+        type=str,
+        default=None,
+        help="Path to QNA_HYPERNET.json file",
+    )
+    parser.add_argument(
+        "--repo",
+        type=str,
+        default=None,
+        help="Repo as owner/repo_name (loads from repos-dir/owner/repo_name/QNA_HYPERNET.json)",
+    )
+    parser.add_argument(
+        "--repos-dir",
+        type=str,
+        default=REPOSITORIES_DIR,
+        help=f"Root of repositories (default: {REPOSITORIES_DIR})",
+    )
+    parser.add_argument(
+        "--max-samples",
+        type=int,
+        default=200,
+        help="Max number of sample pairs to display (default: 200). Use 0 for all.",
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="Show all pairs (overrides --max-samples)",
+    )
+    parser.add_argument(
+        "--output", "-o",
+        type=str,
+        default=None,
+        help="Output HTML file path (default: /tmp/qna_report.html)",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Limit number of repos when iterating over all (for testing)",
+    )
     args = parser.parse_args()
 
-    print(f"Loading data from {args.jsonl_path} ...")
-    records = load_data(args.jsonl_path)
-    print(f"  Loaded {len(records):,} records.")
+    records = []
+    if args.qna:
+        path = args.qna
+        if not os.path.isfile(path):
+            print(f"Error: File not found: {path}")
+            return 1
+        print(f"Loading from {path} ...")
+        records = load_data(path)
+        print(f"  Loaded {len(records):,} pairs.")
+    elif args.repo:
+        parts = args.repo.split("/", 1)
+        if len(parts) != 2:
+            print("Error: --repo must be owner/repo_name")
+            return 1
+        author, repo_name = parts
+        path = os.path.join(args.repos_dir, author, repo_name, QNA_HYPERNET)
+        if not os.path.isfile(path):
+            print(f"Error: QNA file not found: {path}")
+            print("Run: python create_dataset/create_qnas.py --repo", args.repo)
+            return 1
+        print(f"Loading from {path} ...")
+        records = load_data(path)
+        print(f"  Loaded {len(records):,} pairs.")
+    else:
+        # Iterate over all repos with QNA
+        if not os.path.isdir(args.repos_dir):
+            print(f"Error: Repos dir not found: {args.repos_dir}")
+            return 1
+        repos_list = list(iter_repos_with_qna(args.repos_dir))
+        if args.limit:
+            repos_list = repos_list[: args.limit]
+        print(f"Scanning {args.repos_dir} ... found {len(repos_list)} repos with QNA")
+        if not repos_list:
+            print("No repos with QNA_HYPERNET.json found.")
+            return 0
+        for author, repo_name, qna_path in repos_list:
+            try:
+                recs = load_data(qna_path)
+                for r in recs:
+                    r["repo"] = f"{author}/{repo_name}"
+                    if "metadata" in r:
+                        r["metadata"]["repo"] = f"{author}/{repo_name}"
+                records.extend(recs)
+            except Exception as e:
+                print(f"  Warning: skipped {author}/{repo_name}: {e}")
+        print(f"  Loaded {len(records):,} pairs from {len(repos_list)} repos.")
 
-    if args.framework:
-        records = [r for r in records if r.get("framework", "").lower() == args.framework.lower()]
-        print(f"  Filtered to framework='{args.framework}': {len(records):,} records remain.")
+    if not records:
+        print("No pairs to visualize.")
+        return 0
 
     print("Computing statistics ...")
     stats = compute_stats(records)
 
+    max_display = len(records) if (args.all or args.max_samples == 0) else args.max_samples
     print("Generating HTML report ...")
-    report_html = generate_html(records, stats, max_display=args.max_samples)
+    report_html = generate_html(records, stats, max_display=max_display)
 
     if args.output:
         out_path = args.output
     else:
-        base = os.path.splitext(os.path.basename(args.jsonl_path))[0]
-        # Default to /tmp to avoid disk quota issues on shared filesystems
-        out_path = os.path.join("/tmp", f"{base}_report.html")
+        out_path = os.path.join("/tmp", "qna_report.html")
 
-    with open(out_path, "w") as f:
+    with open(out_path, "w", encoding="utf-8") as f:
         f.write(report_html)
     print(f"Report saved to: {out_path}")
-    print(f"Open it in a browser:  firefox {out_path}")
+    print(f"Open in browser:  firefox {out_path}")
+
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    exit(main())

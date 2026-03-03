@@ -4,6 +4,7 @@
 #SBATCH --mem=32G
 #SBATCH --account=def-yuntian
 
+# salloc --time=05:00:00  --mem=32G --account=def-yuntian
 # cd $SCRATCH
 
 module purge

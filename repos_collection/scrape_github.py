@@ -228,6 +228,7 @@ def mine_range(star_range, max_pages=10, pushed_range=None):
                         "stars": stars,
                         "language": repo_details.get("language", repo.get("language")),
                         "matched_query": q,
+                        "repo_size_kb": repo_details.get("size", 0),
                     }
                     
                     time.sleep(0.1)  # Small delay to avoid rate limits
@@ -264,13 +265,15 @@ def append_repos_to_file(repos, outfile):
     return new_count, len(existing)
 
 
-def main(target=5000, outfile="repos_collection/pytest_repos_5k.jsonl"):
+def main(target=5000, outfile="repos_collection/pytest_repos_5k_2024.jsonl"):
     star_slices = [
-        # "6..20", "21..50", 
+        "6..20", 
+        # "21..50", 
         # "51..100",
-        "101..300", "301..700", "701..2000", "2001..100000"
+        # "101..300", "301..700", "701..2000", "2001..100000"
     ]
-    pushed_range = "2025-01-01..2025-12-31"
+    # pushed_range = "2025-01-01..2025-12-31"
+    pushed_range = "2024-01-01..2024-12-31"
     
     # Load existing repos if file exists
     all_repos = load_existing_repos(outfile)

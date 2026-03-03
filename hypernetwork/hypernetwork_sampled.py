@@ -1,11 +1,114 @@
 #!/usr/bin/env python3
 
 import os
+import sys
 import json
-import random
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+REPO_METADATA = "REPO_METADATA.json"
+QNA_HYPERNET = "QNA_HYPERNET.json"
+
+
+def _check_repo_embeddings_impl(repos_root: Path, min_examples: int = 30) -> Dict[str, Any]:
+    """Scan all repos and report embedding status. No heavy deps."""
+    total_repos = 0
+    with_meta = 0
+    with_qna = 0
+    with_embedding = 0
+    with_enough_examples = 0
+    missing_embedding = []
+    missing_qna = []
+    embedding_none_or_empty = []
+
+    for author_dir in sorted(p for p in repos_root.iterdir() if p.is_dir()):
+        author = author_dir.name
+        for repo_dir in sorted(p for p in author_dir.iterdir() if p.is_dir()):
+            repo_name = repo_dir.name
+            total_repos += 1
+            meta_path = repo_dir / REPO_METADATA
+            qna_path = repo_dir / QNA_HYPERNET
+            repo_full = f"{author}/{repo_name}"
+
+            if not meta_path.exists():
+                continue
+            with_meta += 1
+
+            if not qna_path.exists():
+                missing_qna.append(repo_full)
+                continue
+            with_qna += 1
+
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                emb = meta.get("embedding")
+            except (json.JSONDecodeError, OSError):
+                missing_embedding.append(repo_full)
+                continue
+
+            if emb is None or (isinstance(emb, list) and len(emb) == 0):
+                embedding_none_or_empty.append(repo_full)
+                continue
+            if not isinstance(emb, list):
+                missing_embedding.append(repo_full)
+                continue
+            with_embedding += 1
+
+            try:
+                qna = json.loads(qna_path.read_text(encoding="utf-8"))
+                pairs = qna.get("pairs", [])
+            except (json.JSONDecodeError, OSError):
+                continue
+            if len(pairs) >= min_examples:
+                with_enough_examples += 1
+
+    return {
+        "total_repos": total_repos,
+        "with_meta": with_meta,
+        "with_qna": with_qna,
+        "with_embedding": with_embedding,
+        "with_enough_examples": with_enough_examples,
+        "missing_embedding": missing_embedding,
+        "missing_qna": missing_qna,
+        "embedding_none_or_empty": embedding_none_or_empty,
+    }
+
+
+# Early exit for --check-embeddings (no torch/trl/transformers needed)
+if "--check-embeddings" in sys.argv:
+    import argparse
+    ap = argparse.ArgumentParser()
+    default_repos = os.path.join(
+        os.environ.get("SCRATCH", os.path.expanduser("~/scratch")),
+        "REPO_DATASET", "repositories",
+    )
+    ap.add_argument("--repos-root", type=str, default=default_repos)
+    ap.add_argument("--min-examples", type=int, default=30)
+    ap.add_argument("--check-embeddings", action="store_true")
+    args = ap.parse_args()
+    repos_root = Path(args.repos_root).expanduser().resolve()
+    report = _check_repo_embeddings_impl(repos_root, min_examples=args.min_examples)
+    print("\n[Embedding check]")
+    print(f"  total_repos: {report['total_repos']}")
+    print(f"  with REPO_METADATA: {report['with_meta']}")
+    print(f"  with QNA_HYPERNET: {report['with_qna']}")
+    print(f"  with valid embedding: {report['with_embedding']}")
+    print(f"  with >= {args.min_examples} examples: {report['with_enough_examples']}")
+    if report["embedding_none_or_empty"]:
+        n = len(report["embedding_none_or_empty"])
+        print(f"  embedding None/empty ({n}): {report['embedding_none_or_empty'][:10]}{'...' if n > 10 else ''}")
+    if report["missing_embedding"]:
+        n = len(report["missing_embedding"])
+        print(f"  missing/invalid embedding ({n}): {report['missing_embedding'][:10]}{'...' if n > 10 else ''}")
+    if report["missing_qna"]:
+        n = len(report["missing_qna"])
+        print(f"  missing QNA_HYPERNET ({n}): {report['missing_qna'][:10]}{'...' if n > 10 else ''}")
+    print()
+    sys.exit(0)
+
+# --- Heavy imports (torch, trl, transformers) ---
+import random
+from dataclasses import dataclass
 import re
 import math
 import torch
@@ -70,20 +173,131 @@ def load_jsonl(path):
     return items
 
 
-def load_embeddings_dict(emb_dir):
-    out = {}
-    for p in sorted(emb_dir.glob("*.json")):
-        try:
-            obj = json.loads(p.read_text(encoding="utf-8"))
-            if not obj.get("ok", True):
+def load_from_splits(
+    splits_dir: Path,
+    limit_train_repos: Optional[int],
+    limit_eval_repos: Optional[int],
+    limit_test_repos: Optional[int],
+) -> Tuple[List[Dict], List[Dict], List[Dict]]:
+    """
+    Load from create_splits output: train.json, cr_val.json, cr_test.json.
+    Each has repositories: {repo: {qna_pairs, embedding}}.
+    limit_*_repos: take first N repos from each split (None = all).
+    Returns (train_items, eval_items, test_items) as flat lists of {repo, prefix, target, repo_embedding}.
+    """
+    def load_split(path: Path, limit: Optional[int]) -> List[Dict]:
+        if not path.exists():
+            return []
+        data = json.loads(path.read_text(encoding="utf-8"))
+        repos = data.get("repositories", {})
+        repo_names = sorted(repos.keys())
+        if limit is not None:
+            repo_names = repo_names[:limit]
+        items = []
+        for repo in repo_names:
+            r = repos[repo]
+            pairs = r.get("qna_pairs", [])
+            emb = r.get("embedding")
+            if emb is None:
                 continue
-            v = obj.get("repo_embedding")
-            if v is None:
+            for p in pairs:
+                prefix = p.get("prefix", "")
+                target = p.get("target", "")
+                if not prefix or not target:
+                    continue
+                items.append({
+                    "repo": repo,
+                    "repo_name": repo,
+                    "prefix": prefix,
+                    "target": target,
+                    "repo_embedding": emb,
+                })
+        return items
+
+    train_items = load_split(splits_dir / "train.json", limit_train_repos)
+    eval_items = load_split(splits_dir / "cr_val.json", limit_eval_repos)
+    test_items = load_split(splits_dir / "cr_test.json", limit_test_repos)
+    return train_items, eval_items, test_items
+
+
+def load_repos_with_embeddings_and_qnas(
+    repos_root: Path,
+    min_examples: int,
+    max_examples_per_repo: int,
+    n_train_repos: int,
+    n_eval_repos: int,
+    seed: int,
+) -> Tuple[List[Dict], List[Dict]]:
+    """
+    Load from repos: REPO_METADATA.json (embedding) + QNA_HYPERNET.json (pairs).
+    Returns (train_items, eval_items) where each item has repo, prefix, target, repo_embedding.
+    - Only repos with >= min_examples pairs
+    - Up to max_examples_per_repo first examples per repo
+    - n_train_repos for training, n_eval_repos for evaluation (repo-level split)
+    """
+    by_repo = {}
+    for author_dir in sorted(p for p in repos_root.iterdir() if p.is_dir()):
+        author = author_dir.name
+        for repo_dir in sorted(p for p in author_dir.iterdir() if p.is_dir()):
+            repo_name = repo_dir.name
+            meta_path = repo_dir / REPO_METADATA
+            qna_path = repo_dir / QNA_HYPERNET
+            if not meta_path.exists() or not qna_path.exists():
                 continue
-            out[p.stem] = v
-        except Exception as e:
-            print(f"Warning: failed to load {p}: {e}")
-    return out
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                emb = meta.get("embedding")
+                if not emb or not isinstance(emb, list):
+                    continue
+            except (json.JSONDecodeError, OSError):
+                continue
+            try:
+                qna = json.loads(qna_path.read_text(encoding="utf-8"))
+                pairs = qna.get("pairs", [])
+            except (json.JSONDecodeError, OSError):
+                continue
+            if len(pairs) < min_examples:
+                continue
+            pairs = pairs[:max_examples_per_repo]
+            repo_full = f"{author}/{repo_name}"
+            items = []
+            for p in pairs:
+                prefix = p.get("prefix", "")
+                target = p.get("target", "")
+                if not prefix or not target:
+                    continue
+                items.append({
+                    "repo": repo_full,
+                    "repo_name": repo_full,
+                    "prefix": prefix,
+                    "target": target,
+                    "repo_embedding": emb,
+                })
+            if items:
+                by_repo[repo_full] = items
+            if len(by_repo) >= n_train_repos + n_eval_repos:
+                break
+        if len(by_repo) >= n_train_repos + n_eval_repos:
+            break
+
+    repo_names = sorted(by_repo.keys())
+    random.seed(seed)
+    random.shuffle(repo_names)
+    n_available = len(repo_names)
+    if n_available < n_train_repos + n_eval_repos:
+        print(f"Warning: only {n_available} repos with >= {min_examples} examples "
+              f"(requested {n_train_repos} train + {n_eval_repos} eval)")
+    train_repos = repo_names[:min(n_train_repos, n_available)]
+    eval_repos = repo_names[n_train_repos : min(n_train_repos + n_eval_repos, n_available)]
+
+    train_items = []
+    for r in train_repos:
+        train_items.extend(by_repo[r])
+    eval_items = []
+    for r in eval_repos:
+        eval_items.extend(by_repo[r])
+
+    return train_items, eval_items
 
 
 def repo_to_embedding_key(repo):
@@ -119,57 +333,27 @@ def prepare_tokens_and_labels(prefix, target, tok, add_eos=True):
     }
 
 
-def smart_truncate_keep_two_part_prefix(tokens, labels, prefix_len, max_len, head_keep= 256, tail_keep_min = 512):
+def left_truncate_left_pad(tokens, labels, max_len, pad_token_id):
     """
-
-      tokens = [BOS] + prefix + target
-      labels = [-100]*(1+prefix_len) + target
-
+    Left truncate: keep rightmost max_len tokens (drop prefix from left when too long).
+    Left pad: pad on left when too short.
+    tokens = [BOS] + prefix + target, labels = [-100]*(1+prefix_len) + target_ids
+    Target is always kept; prefix may be truncated from the left.
     """
-    if len(tokens) <= max_len:
-        return tokens, labels
-
-    bos = tokens[0]
-    prefix_tokens = tokens[1 : 1 + prefix_len]
-    target_tokens = tokens[1 + prefix_len :]
-    target_labels = labels[1 + prefix_len :]
-
-    keep_target_len = 1 + len(target_tokens)
-
-    if keep_target_len >= max_len:
-        new_tokens = tokens[-max_len:]
-        new_labels = labels[-max_len:]
-        return new_tokens, new_labels
-
-    space_for_prefix = max_len - keep_target_len
-
-    head = prefix_tokens[: min(head_keep, len(prefix_tokens))]
-    head_labels = [-100] * len(head)
-
-    remaining = space_for_prefix - len(head)
-    if remaining < 0:
-        head = head[:space_for_prefix]
-        head_labels = [-100] * len(head)
-        tail = []
-        tail_labels = []
-    else:
-        tail_take = min(len(prefix_tokens) - len(head), remaining)
-        tail = prefix_tokens[-tail_take:] if tail_take > 0 else []
-        tail_labels = [-100] * len(tail)
-
-    new_prefix = head + tail
-    new_tokens = [bos] + new_prefix + target_tokens
-    new_labels = [-100] + ([-100] * len(new_prefix)) + target_labels
-
-    return new_tokens, new_labels
+    if len(tokens) > max_len:
+        tokens = tokens[-max_len:]
+        labels = labels[-max_len:]
+    if len(tokens) < max_len:
+        pad_len = max_len - len(tokens)
+        tokens = [pad_token_id] * pad_len + tokens
+        labels = [-100] * pad_len + labels
+    return tokens, labels
 
 
 @dataclass
 class HypernetDataCollator:
     pad_token_id: int
     max_seq_len: int = 8192
-    head_keep: int = 256
-    tail_keep_min: int = 512
 
     def __call__(self, examples):
         ex = examples[0]  # batch_size=1
@@ -179,13 +363,11 @@ class HypernetDataCollator:
         ctx = torch.tensor(ex["repo_embedding"], dtype=torch.float32).unsqueeze(0)  # [1, dim]
 
         orig_len = len(ex["tokens"])
-        tokens, labels = smart_truncate_keep_two_part_prefix(
+        tokens, labels = left_truncate_left_pad(
             tokens=ex["tokens"],
             labels=ex["labels"],
-            prefix_len=ex["prefix_len"],
             max_len=self.max_seq_len,
-            head_keep=self.head_keep,
-            tail_keep_min=self.tail_keep_min,
+            pad_token_id=self.pad_token_id,
         )
 
         attention_mask = [0 if t == self.pad_token_id else 1 for t in tokens]
@@ -559,11 +741,11 @@ class HypernetTrainer(SFTTrainer):
         return dataset
     
     def save_model(self, output_dir=None, _internal_call=False):
-        if _internal_call: 
-            return
         if output_dir is None:
             output_dir = self.args.output_dir
         os.makedirs(output_dir, exist_ok=True)
+        if _internal_call:
+            return
 
 
 class SaveHypernetCallback(TrainerCallback):
@@ -578,6 +760,7 @@ class SaveHypernetCallback(TrainerCallback):
             "module_specs": self.module_specs,
             "hypernet_config": {
                 "input_dim": self.hypernet.input_dim,
+                "hidden_dim": self.hypernet.hidden_dim,
                 "rank": self.hypernet.rank,
                 "types": self.hypernet.types,
                 "type_shapes": self.hypernet.type_shapes,
@@ -586,15 +769,49 @@ class SaveHypernetCallback(TrainerCallback):
 
     def on_save(self, args, state, control, **kwargs):
         ckpt_dir = os.path.join(args.output_dir, f"checkpoint-{state.global_step}")
-        if os.path.exists(ckpt_dir):
-            path = os.path.join(ckpt_dir, self.filename)
-            torch.save(self._payload(), path)
-            print(f"Saved hypernet -> {path}")
+        os.makedirs(ckpt_dir, exist_ok=True)
+        path = os.path.join(ckpt_dir, self.filename)
+        torch.save(self._payload(), path)
+        print(f"Saved hypernet -> {path}")
 
     def on_train_end(self, args, state, control, **kwargs):
+        os.makedirs(args.output_dir, exist_ok=True)
         path = os.path.join(args.output_dir, self.filename)
         torch.save(self._payload(), path)
         print(f"Saved final hypernet -> {path}")
+
+
+class SaveBestHypernetCallback(TrainerCallback):
+    """Saves the hypernet whenever eval_loss improves."""
+    def __init__(self, hypernet: Hypernetwork, module_specs, filename="hypernet_best.pt"):
+        self.hypernet = hypernet
+        self.module_specs = module_specs
+        self.filename = filename
+        self.best_eval_loss = float("inf")
+
+    def _payload(self):
+        return {
+            "hypernet_state_dict": self.hypernet.state_dict(),
+            "module_specs": self.module_specs,
+            "hypernet_config": {
+                "input_dim": self.hypernet.input_dim,
+                "hidden_dim": self.hypernet.hidden_dim,
+                "rank": self.hypernet.rank,
+                "types": self.hypernet.types,
+                "type_shapes": self.hypernet.type_shapes,
+            }
+        }
+
+    def on_evaluate(self, args, state, control, metrics=None, **kwargs):
+        if metrics is None:
+            return
+        eval_loss = metrics.get("eval_loss")
+        if eval_loss is not None and eval_loss < self.best_eval_loss:
+            self.best_eval_loss = eval_loss
+            os.makedirs(args.output_dir, exist_ok=True)
+            path = os.path.join(args.output_dir, self.filename)
+            torch.save(self._payload(), path)
+            print(f"Saved best hypernet (eval_loss={eval_loss:.4f}) -> {path}")
 
 
 def prepare_training_items(raw_items, tok):
@@ -605,12 +822,15 @@ def prepare_training_items(raw_items, tok):
         target = it.get("target", "")
         if not repo or not prefix or not target:
             continue
+        if it.get("repo_embedding") is None:
+            continue
 
         tl = prepare_tokens_and_labels(prefix, target, tok, add_eos=True)
 
         out.append({
             "repo": repo,
             "repo_name": repo,
+            "repo_embedding": it.get("repo_embedding"),
             "tokens": tl["tokens"],
             "labels": tl["labels"],
             "prefix_len": tl["prefix_len"],
@@ -620,22 +840,6 @@ def prepare_training_items(raw_items, tok):
             "metadata": it.get("metadata", {}),
         })
     return out
-
-
-def attach_embeddings(items, emb):
-    kept = []
-    missing = 0
-    for it in items:
-        key = repo_to_embedding_key(it["repo"])
-        v = emb.get(key)
-        if v is None:
-            missing += 1
-            continue
-        it["repo_embedding"] = v
-        kept.append(it)
-    if missing:
-        print(f"!!! Dropped {missing} examples missing embeddings")
-    return kept
 
 
 def to_hf_dataset(items, seed, shuffle):
@@ -649,34 +853,72 @@ def to_hf_dataset(items, seed, shuffle):
 def main():
     ap = argparse.ArgumentParser()
 
-    ap.add_argument("--train-jsonl", type=str, default="/scratch/lhotsko/train_qna_pairs/test_next_block.jsonl")
-    ap.add_argument("--val-jsonl", type=str, default="/scratch/lhotsko/val_qna_pairs/test_next_block.jsonl")
-    ap.add_argument("--test-jsonl", type=str, default="/scratch/lhotsko/test_qna_pairs/test_next_block.jsonl")
-
-    ap.add_argument("--emb-dir", type=str, default="/scratch/lhotsko/repo_embeddings")
+    default_dataset = os.path.join(
+        os.environ.get("SCRATCH", os.path.expanduser("~/scratch")),
+        "REPO_DATASET",
+    )
+    ap.add_argument("--splits-dir", type=str, default=default_dataset,
+                    help="Dir with train.json, cr_val.json, cr_test.json (from create_splits.py)")
+    ap.add_argument("--limit-train-repos", type=int, default=None,
+                    help="Use only first N repos from train.json (default: all)")
+    ap.add_argument("--limit-eval-repos", type=int, default=None,
+                    help="Use only first N repos from cr_val.json (default: all)")
+    ap.add_argument("--limit-test-repos", type=int, default=None,
+                    help="Use only first N repos from cr_test.json (default: all)")
     ap.add_argument("--model-name", type=str, default="Qwen/Qwen2.5-Coder-1.5B")
-    ap.add_argument("--output-dir", type=str, default="/scratch/lhotsko/model_checkpoints/hypernet_repo_splits_v2")
+    ap.add_argument("--output-dir", type=str, default="/scratch/lhotsko/TRAINING_CHECKPOINTS/HYPERNET/full_repos")
 
     ap.add_argument("--rank", type=int, default=16)
     ap.add_argument("--alpha", type=int, default=32)
 
     ap.add_argument("--max-seq-len", type=int, default=8192)
-    ap.add_argument("--head-keep", type=int, default=256)
-    ap.add_argument("--tail-keep-min", type=int, default=512)
 
     ap.add_argument("--hidden-dim", type=int, default=512)
 
     ap.add_argument("--grad-accum", type=int, default=1)
     ap.add_argument("--lr", type=float, default=1e-4)
-    ap.add_argument("--epochs", type=int, default=5)
-    ap.add_argument("--eval-steps", type=int, default=500)
-    ap.add_argument("--save-steps", type=int, default=500)
+    ap.add_argument("--epochs", type=int, default=3)
+    ap.add_argument("--eval-steps", type=int, default=1000)
+    ap.add_argument("--save-steps", type=int, default=1000)
     ap.add_argument("--save-total-limit", type=int, default=1)
     ap.add_argument("--seed", type=int, default=3407)
+    ap.add_argument("--check-embeddings", action="store_true",
+                    help="Only check embedding status across repos and exit")
 
     args = ap.parse_args()
 
+    splits_dir = Path(args.splits_dir).expanduser().resolve()
+    repos_root = splits_dir / "repositories"
+    emb_report = _check_repo_embeddings_impl(repos_root, min_examples=30)
+    print("\n[Embedding check]")
+    print(f"  total_repos: {emb_report['total_repos']}")
+    print(f"  with REPO_METADATA: {emb_report['with_meta']}")
+    print(f"  with QNA_HYPERNET: {emb_report['with_qna']}")
+    print(f"  with valid embedding: {emb_report['with_embedding']}")
+    print(f"  with >= 30 examples: {emb_report['with_enough_examples']}")
+    if emb_report["embedding_none_or_empty"]:
+        print(f"  embedding None/empty ({len(emb_report['embedding_none_or_empty'])}): "
+              f"{emb_report['embedding_none_or_empty'][:10]}{'...' if len(emb_report['embedding_none_or_empty']) > 10 else ''}")
+    if emb_report["missing_embedding"]:
+        print(f"  missing/invalid embedding ({len(emb_report['missing_embedding'])}): "
+              f"{emb_report['missing_embedding'][:10]}{'...' if len(emb_report['missing_embedding']) > 10 else ''}")
+    if emb_report["missing_qna"]:
+        print(f"  missing QNA_HYPERNET ({len(emb_report['missing_qna'])}): "
+              f"{emb_report['missing_qna'][:10]}{'...' if len(emb_report['missing_qna']) > 10 else ''}")
+    print()
+
+    if args.check_embeddings:
+        print("--check-embeddings: exiting.")
+        return
+
     set_seed(args.seed)
+
+    train_items, eval_items, test_items = load_from_splits(
+        splits_dir=splits_dir,
+        limit_train_repos=args.limit_train_repos,
+        limit_eval_repos=args.limit_eval_repos,
+        limit_test_repos=args.limit_test_repos,
+    )
 
     print("=" * 80)
     print("[DEBUG] CONFIGURATION:")
@@ -684,7 +926,7 @@ def main():
         print(f"  {k}: {v}")
     print("=" * 80, flush=True)
 
-    wandb.init(project="hypernetwork-REPOPEFTDATA", name=args.output_dir.split("/")[-1])
+    wandb.init(project="hypernetwork-REPOPEFTDATA_full_repos", name=args.output_dir.split("/")[-1])
 
     tok = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
     if tok.pad_token is None:
@@ -725,26 +967,27 @@ def main():
         print(f"  [DEBUG] LoRA type={mtype}: count={cnt}  in_features={shape[0]}  out_features={shape[1]}")
     print(f"  [DEBUG] LoRA alpha={args.alpha}  scale={float(args.alpha)/float(args.rank):.2f}", flush=True)
 
-    emb_dir = Path(args.emb_dir).expanduser().resolve()
-    emb = load_embeddings_dict(emb_dir)
-    print(f"Loaded {len(emb)} repo embeddings from {emb_dir}")
+    print(f"Loaded from {splits_dir}: train={len(train_items)} eval={len(eval_items)} test={len(test_items)} examples")
 
-    train_raw = load_jsonl(Path(args.train_jsonl))
-    val_raw = load_jsonl(Path(args.val_jsonl))
-    test_raw = load_jsonl(Path(args.test_jsonl))
-    print(f"QnA sizes: train={len(train_raw)} val={len(val_raw)} test={len(test_raw)}")
+    train_items = prepare_training_items(train_items, tok)
+    eval_items = prepare_training_items(eval_items, tok)
+    test_items = prepare_training_items(test_items, tok)
+    print(f"[DEBUG] After prepare_training_items: train={len(train_items)}  eval={len(eval_items)}  test={len(test_items)}")
 
-    train_items = attach_embeddings(prepare_training_items(train_raw, tok), emb)
-    val_items = attach_embeddings(prepare_training_items(val_raw, tok), emb)
-    test_items = attach_embeddings(prepare_training_items(test_raw, tok), emb)
-    print(f"[DEBUG] After attach_embeddings: train={len(train_items)}  val={len(val_items)}  test={len(test_items)}")
+    all_items = train_items + eval_items + test_items
+    if all_items:
+        missing = [it["repo"] for it in all_items if it.get("repo_embedding") is None]
+        if missing:
+            raise ValueError(f"{len(missing)} items missing embedding: {missing[:5]}...")
+    if not train_items:
+        raise ValueError("No training items loaded. Run create_splits.py first, check --splits-dir.")
 
     embedding_dim = len(train_items[0]["repo_embedding"])
     print(f"Embedding dim: {embedding_dim}")
 
     # Print token length statistics
     import numpy as np
-    for split_name, items in [("train", train_items), ("val", val_items), ("test", test_items)]:
+    for split_name, items in [("train", train_items), ("eval", eval_items), ("test", test_items)]:
         if items:
             lengths = [len(it["tokens"]) for it in items]
             repos = set(it["repo"] for it in items)
@@ -754,14 +997,12 @@ def main():
                   f">{args.max_seq_len}: {sum(1 for l in lengths if l > args.max_seq_len)}", flush=True)
 
     train_ds = to_hf_dataset(train_items, seed=args.seed, shuffle=True)
-    val_ds = to_hf_dataset(val_items, seed=args.seed, shuffle=False)
+    eval_ds = to_hf_dataset(eval_items, seed=args.seed, shuffle=False)
     test_ds = to_hf_dataset(test_items, seed=args.seed, shuffle=False)
 
     collator = HypernetDataCollator(
         pad_token_id=tok.pad_token_id,
         max_seq_len=args.max_seq_len,
-        head_keep=args.head_keep,
-        tail_keep_min=args.tail_keep_min,
     )
 
     hypernet = Hypernetwork(
@@ -815,17 +1056,18 @@ def main():
     total_steps = len(train_items) * args.epochs // args.grad_accum
     print(f"[DEBUG] Estimated total optimization steps: ~{total_steps}", flush=True)
     save_cb = SaveHypernetCallback(hypernet, specs)
+    save_best_cb = SaveBestHypernetCallback(hypernet, specs)
 
     trainer = HypernetTrainer(
         model=model,
         train_dataset=train_ds,
-        eval_dataset=val_ds,
+        eval_dataset=eval_ds,
         data_collator=collator,
         args=sft_cfg,
         optimizers=(opt, None),
         hypernet=hypernet,
         module_specs=specs,
-        callbacks=[save_cb],
+        callbacks=[save_cb, save_best_cb],
     )
 
     print("\nInitial eval...")
@@ -849,11 +1091,11 @@ def main():
     print("final_val_loss =", final_val["eval_loss"])
     wandb.log({"final_val_loss": final_val["eval_loss"]})
 
-    print("\nTEST eval (only once, after training)...")
+    print("\nTest eval (cr_test)...")
     test_metrics = trainer.evaluate(test_ds, metric_key_prefix="test")
-    test_loss = test_metrics.get("test_eval_loss", None)
-    print("test_loss =", test_loss)
+    test_loss = test_metrics.get("test_eval_loss")
     if test_loss is not None:
+        print(f"test_loss = {test_loss}")
         wandb.log({"test_loss": test_loss})
 
     wandb.finish()

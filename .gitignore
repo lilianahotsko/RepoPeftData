@@ -48,3 +48,9 @@ RepoPeftData/
 
 6_construct_embeddings.py
 7_create_train_test_split.py
+qwen-coder-lora-adapter/*
+qwen-coder-lora-adapter/
+hypernetwork_checkpoints/*
+
+# Large report files
+report.html
