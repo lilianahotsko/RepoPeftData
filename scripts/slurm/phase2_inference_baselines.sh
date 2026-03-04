@@ -10,8 +10,7 @@
 #SBATCH --account=def-yuntian
 
 # Phase 2: Inference-only baselines (no training).
-# Pretrained on cr_test + ir_test, RAG k=3/5/10, ICL 3/5-shot.
-# ~4h on H100.
+# Uses structured splits throughout.
 
 source scripts/slurm/common.sh
 mkdir -p slurm_logs
@@ -20,15 +19,15 @@ echo "===== Phase 2: Inference-only baselines ====="
 echo "Start: $(date)"
 
 # --- Pretrained ---
-# echo "--- Pretrained (cr_test) ---"
-# python baselines/pretrained/test_qwen_coder.py \
-#     --splits-dir "$SPLITS_DIR" --split cr_test \
-#     --output "$BASELINES_DIR/pretrained_cr_test.json"
+echo "--- Pretrained (cr_test_structured) ---"
+python baselines/pretrained/test_qwen_coder.py \
+    --splits-dir "$SPLITS_DIR" --split cr_test_structured \
+    --output "$BASELINES_DIR/pretrained_cr_test_structured.json"
 
-# echo "--- Pretrained (ir_test) ---"
-# python baselines/pretrained/test_qwen_coder.py \
-#     --splits-dir "$SPLITS_DIR" --split ir_test \
-#     --output "$BASELINES_DIR/pretrained_ir_test.json"
+echo "--- Pretrained (ir_test_structured) ---"
+python baselines/pretrained/test_qwen_coder.py \
+    --splits-dir "$SPLITS_DIR" --split ir_test_structured \
+    --output "$BASELINES_DIR/pretrained_ir_test_structured.json"
 
 # --- RAG: build indices once, then eval at different k ---
 echo "--- RAG: Building chunk indices ---"
@@ -38,21 +37,21 @@ python baselines/rag/build_indices.py \
     --cache-dir "$SCRATCH/RAG_CHUNK_CACHE"
 
 for k in 3 5 10; do
-    echo "--- RAG top-$k (cr_test) ---"
+    echo "--- RAG top-$k (cr_test_structured) ---"
     python baselines/rag/test_rag.py \
         --splits-dir "$SPLITS_DIR" \
         --cache-dir "$SCRATCH/RAG_CHUNK_CACHE" \
-        --split cr_test --top-k $k \
+        --split cr_test_structured --top-k $k \
         --max-input-tokens 16384 \
-        --output "$BASELINES_DIR/rag_top${k}_cr_test.json"
+        --output "$BASELINES_DIR/rag_top${k}_cr_test_structured.json"
 done
 
 # --- ICL ---
 for shots in 3 5; do
-    echo "--- ICL ${shots}-shot (cr_test) ---"
+    echo "--- ICL ${shots}-shot (cr_test_structured) ---"
     python baselines/icl/test_icl.py \
-        --splits-dir "$SPLITS_DIR" --split cr_test --n-shots $shots \
-        --output "$BASELINES_DIR/icl_${shots}shot_cr_test.json"
+        --splits-dir "$SPLITS_DIR" --split cr_test_structured --n-shots $shots \
+        --output "$BASELINES_DIR/icl_${shots}shot_cr_test_structured.json"
 done
 
 # --- Oracle Context (import-aware) ---
@@ -62,12 +61,12 @@ python baselines/oracle_context/build_context.py \
     --splits-dir "$SPLITS_DIR" \
     --cache-dir "$SCRATCH/ORACLE_CONTEXT_CACHE"
 
-echo "--- Oracle Context: Eval (cr_test) ---"
+echo "--- Oracle Context: Eval (cr_test_structured) ---"
 python baselines/oracle_context/test_oracle_context.py \
     --splits-dir "$SPLITS_DIR" \
     --cache-dir "$SCRATCH/ORACLE_CONTEXT_CACHE" \
-    --split cr_test \
+    --split cr_test_structured \
     --max-input-tokens 16384 \
-    --output "$BASELINES_DIR/oracle_context_cr_test.json"
+    --output "$BASELINES_DIR/oracle_context_cr_test_structured.json"
 
 echo "Phase 2 complete: $(date)"

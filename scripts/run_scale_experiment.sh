@@ -59,13 +59,13 @@ python hypernetwork/hypernetwork_sampled_test.py \
     --checkpoint "$OUTPUT_DIR" \
     --model-name "$MODEL_NAME" \
     --splits-dir "$SPLITS_DIR" \
-    --split cr_test
+    --split cr_test_structured
 
 # Evaluate pretrained baseline for this model size
 python baselines/pretrained/test_qwen_coder.py \
     --model-name "$MODEL_NAME" \
     --splits-dir "$SPLITS_DIR" \
-    --split cr_test \
-    --output "$SCRATCH/BASELINES/pretrained_${SIZE}_cr_test.json"
+    --split cr_test_structured \
+    --output "$SCRATCH/BASELINES/pretrained_${SIZE}_cr_test_structured.json"
 
 echo "Scale experiment $SIZE complete."

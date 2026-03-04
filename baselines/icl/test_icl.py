@@ -93,7 +93,7 @@ def main():
     default_dataset = get_default_splits_dir()
 
     ap.add_argument("--splits-dir", type=str, default=default_dataset)
-    ap.add_argument("--split", type=str, default="cr_test")
+    ap.add_argument("--split", type=str, default="cr_test_structured")
     ap.add_argument("--model-name", type=str, default="Qwen/Qwen2.5-Coder-1.5B")
     ap.add_argument("--n-shots", type=int, default=5, help="Number of few-shot examples")
     ap.add_argument("--max-new-tokens", type=int, default=128)

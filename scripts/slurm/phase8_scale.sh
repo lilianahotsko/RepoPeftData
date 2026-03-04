@@ -8,9 +8,8 @@
 #SBATCH --mem=80G
 #SBATCH --account=def-yuntian
 
-# Phase 8: Scale experiments -- train hypernetwork with 0.5B and 3B base models.
-# The hypernetwork is small (~50M params); only it gets retrained. Base model frozen.
-# ~8h on H100.
+# Phase 8: Scale experiments with 0.5B and 3B base models.
+# Uses structured splits.
 
 source scripts/slurm/common.sh
 mkdir -p slurm_logs
@@ -35,12 +34,12 @@ python hypernetwork/hypernetwork_sampled_test.py \
     --checkpoint "$OUT_05B" \
     --model-name "$MODEL_05B" \
     --splits-dir "$SPLITS_DIR" \
-    --split cr_test
+    --split cr_test_structured
 
 python baselines/pretrained/test_qwen_coder.py \
     --model-name "$MODEL_05B" \
-    --splits-dir "$SPLITS_DIR" --split cr_test \
-    --output "$BASELINES_DIR/pretrained_0.5B_cr_test.json"
+    --splits-dir "$SPLITS_DIR" --split cr_test_structured \
+    --output "$BASELINES_DIR/pretrained_0.5B_cr_test_structured.json"
 
 # --- 3B ---
 echo "--- Scale: 3B ---"
@@ -59,11 +58,11 @@ python hypernetwork/hypernetwork_sampled_test.py \
     --checkpoint "$OUT_3B" \
     --model-name "$MODEL_3B" \
     --splits-dir "$SPLITS_DIR" \
-    --split cr_test
+    --split cr_test_structured
 
 python baselines/pretrained/test_qwen_coder.py \
     --model-name "$MODEL_3B" \
-    --splits-dir "$SPLITS_DIR" --split cr_test \
-    --output "$BASELINES_DIR/pretrained_3B_cr_test.json"
+    --splits-dir "$SPLITS_DIR" --split cr_test_structured \
+    --output "$BASELINES_DIR/pretrained_3B_cr_test_structured.json"
 
 echo "Phase 8 complete: $(date)"

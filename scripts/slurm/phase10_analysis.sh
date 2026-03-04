@@ -9,8 +9,6 @@
 #SBATCH --account=def-yuntian
 
 # Phase 10: Analysis, figures, and tables.
-# Needs GPU for LoRA visualization (hypernetwork forward passes).
-# ~1h on H100.
 
 source scripts/slurm/common.sh
 mkdir -p slurm_logs
@@ -18,13 +16,11 @@ mkdir -p slurm_logs
 echo "===== Phase 10: Analysis ====="
 echo "Start: $(date)"
 
-# --- Results analysis ---
 python analysis/analyze_results.py \
     --results-dir "$BASELINES_DIR" \
     --output-dir analysis/output \
-    --hypernet-results "$CKPT_DIR/HYPERNET/full_repos_results/cr_test/results.json"
+    --hypernet-results "$CKPT_DIR/HYPERNET/full_repos_results/cr_test_structured/results.json"
 
-# --- LoRA visualization ---
 python analysis/visualize_loras.py \
     --checkpoint "$CKPT_DIR/HYPERNET/full_repos" \
     --splits-dir "$SPLITS_DIR" \
@@ -33,10 +29,7 @@ python analysis/visualize_loras.py \
 
 echo ""
 echo "===== Summary of all results ====="
-echo ""
-
-# Print all result files
-for f in "$BASELINES_DIR"/*.json; do
+for f in "$BASELINES_DIR"/*_structured.json; do
     if [ -f "$f" ]; then
         name=$(basename "$f" .json)
         em=$(python -c "import json; d=json.load(open('$f')); print(f\"{d.get('exact_match_pct',0):.2f}%\")" 2>/dev/null || echo "N/A")
@@ -47,5 +40,3 @@ done
 
 echo ""
 echo "Phase 10 complete: $(date)"
-echo "Analysis outputs in: analysis/output/"
-echo "Figures in: analysis/figures/"

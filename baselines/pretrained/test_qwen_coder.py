@@ -168,8 +168,8 @@ def main():
                     help="Output JSON path (e.g. $SCRATCH/BASELINES/qwen_full.json)")
     ap.add_argument("--splits-dir", type=str, default=default_dataset,
                     help="Dir with cr_test.json, cr_val.json, etc.")
-    ap.add_argument("--split", type=str, default="cr_test",
-                    help="Split to evaluate (default: cr_test)")
+    ap.add_argument("--split", type=str, default="cr_test_structured",
+                    help="Split to evaluate (default: cr_test_structured)")
     ap.add_argument("--model-name", type=str, default="Qwen/Qwen2.5-Coder-1.5B")
     ap.add_argument("--max-new-tokens", type=int, default=128,
                     help="Max tokens to generate (default 128, use 64 for faster)")

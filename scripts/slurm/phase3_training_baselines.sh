@@ -9,7 +9,7 @@
 #SBATCH --account=def-yuntian
 
 # Phase 3: Train + eval fine-tuned and single LoRA baselines.
-# ~8h on H100.
+# Uses structured splits throughout.
 
 source scripts/slurm/common.sh
 mkdir -p slurm_logs
@@ -25,17 +25,17 @@ python baselines/finetuned/train_finetuned.py \
     --epochs 3 --batch-size 4 --grad-accum 8 --lr 2e-5 \
     --no-wandb
 
-echo "--- Fine-tuned: Eval (cr_test) ---"
+echo "--- Fine-tuned: Eval (cr_test_structured) ---"
 python baselines/finetuned/test_finetuned.py \
     --model-path "$CKPT_DIR/FINETUNED/final" \
-    --splits-dir "$SPLITS_DIR" --split cr_test \
-    --output "$BASELINES_DIR/finetuned_cr_test.json"
+    --splits-dir "$SPLITS_DIR" --split cr_test_structured \
+    --output "$BASELINES_DIR/finetuned_cr_test_structured.json"
 
-echo "--- Fine-tuned: Eval (ir_test) ---"
+echo "--- Fine-tuned: Eval (ir_test_structured) ---"
 python baselines/finetuned/test_finetuned.py \
     --model-path "$CKPT_DIR/FINETUNED/final" \
-    --splits-dir "$SPLITS_DIR" --split ir_test \
-    --output "$BASELINES_DIR/finetuned_ir_test.json"
+    --splits-dir "$SPLITS_DIR" --split ir_test_structured \
+    --output "$BASELINES_DIR/finetuned_ir_test_structured.json"
 
 # --- Single LoRA ---
 echo "--- Single LoRA: Training ---"
@@ -45,16 +45,16 @@ python baselines/single_lora/train_single_lora.py \
     --epochs 3 --batch-size 4 --grad-accum 4 --lr 2e-4 \
     --no-wandb
 
-echo "--- Single LoRA: Eval (cr_test) ---"
+echo "--- Single LoRA: Eval (cr_test_structured) ---"
 python baselines/single_lora/test_single_lora.py \
     --adapter "$CKPT_DIR/SINGLE_LORA/adapter" \
-    --splits-dir "$SPLITS_DIR" --split cr_test \
-    --output "$BASELINES_DIR/single_lora_cr_test.json"
+    --splits-dir "$SPLITS_DIR" --split cr_test_structured \
+    --output "$BASELINES_DIR/single_lora_cr_test_structured.json"
 
-echo "--- Single LoRA: Eval (ir_test) ---"
+echo "--- Single LoRA: Eval (ir_test_structured) ---"
 python baselines/single_lora/test_single_lora.py \
     --adapter "$CKPT_DIR/SINGLE_LORA/adapter" \
-    --splits-dir "$SPLITS_DIR" --split ir_test \
-    --output "$BASELINES_DIR/single_lora_ir_test.json"
+    --splits-dir "$SPLITS_DIR" --split ir_test_structured \
+    --output "$BASELINES_DIR/single_lora_ir_test_structured.json"
 
 echo "Phase 3 complete: $(date)"

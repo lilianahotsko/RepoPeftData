@@ -65,7 +65,7 @@ def main():
 
     ap.add_argument("--model-path", type=str, required=True, help="Path to fine-tuned model")
     ap.add_argument("--splits-dir", type=str, default=default_dataset)
-    ap.add_argument("--split", type=str, default="cr_test")
+    ap.add_argument("--split", type=str, default="cr_test_structured")
     ap.add_argument("--max-new-tokens", type=int, default=128)
     ap.add_argument("--max-input-tokens", type=int, default=2048)
     ap.add_argument("--batch-size", type=int, default=8)

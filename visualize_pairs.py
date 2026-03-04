@@ -78,6 +78,62 @@ def load_data(path: str, max_lines: int | None = None) -> list[dict]:
     return records
 
 
+def load_from_split(path: str, limit_repos: int | None = None) -> list[dict]:
+    """Load from split JSON (e.g. cr_test_structured.json)."""
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    repos = data.get("repositories", {})
+    repo_names = sorted(repos.keys())
+    if limit_repos:
+        repo_names = repo_names[:limit_repos]
+    records = []
+    for repo_name in repo_names:
+        r = repos[repo_name]
+        for p in r.get("qna_pairs", []):
+            prefix = p.get("prefix", "")
+            target = p.get("target", "")
+            if not prefix or not target:
+                continue
+            meta = p.get("metadata", {})
+            records.append({
+                "prefix": prefix,
+                "target": target,
+                "repo": repo_name,
+                "assertion_type": p.get("assertion_type", "unknown"),
+                "metadata": {
+                    "file": meta.get("file", ""),
+                    "function": meta.get("test_function", ""),
+                    "cut_line": meta.get("lineno", ""),
+                    "cut_kind": p.get("assertion_type", ""),
+                    "was_multiline": meta.get("was_multiline", False),
+                    "prefix_type": meta.get("prefix_type", "original"),
+                },
+            })
+    return records
+
+
+def classify_target_difficulty(target: str) -> str:
+    """Classify assertion target by difficulty."""
+    t = target.strip()
+    if t in ("True", "False"):
+        return "bool_literal"
+    if t == "None":
+        return "none_literal"
+    if t.startswith(("'", '"', "b'", 'b"', "f'", 'f"')):
+        return "string_literal"
+    if t.replace("-", "").replace(".", "").replace("e", "").replace("+", "").isdigit():
+        return "numeric_literal"
+    if t.startswith(("[",)):
+        return "list/tuple"
+    if t.startswith(("{",)):
+        return "dict/set"
+    if "(" in t:
+        return "function_call"
+    if t.isidentifier():
+        return "variable"
+    return "complex_expr"
+
+
 def compute_stats(records: list[dict]) -> dict:
     stats = {}
     stats["total"] = len(records)
@@ -87,9 +143,23 @@ def compute_stats(records: list[dict]) -> dict:
     stats["num_repos"] = len(repo_counts)
     stats["top_repos"] = repo_counts.most_common(20)
 
+    # Pairs per repo distribution
+    pairs_per_repo = sorted(repo_counts.values())
+    if pairs_per_repo:
+        stats["pairs_per_repo"] = {
+            "min": min(pairs_per_repo), "max": max(pairs_per_repo),
+            "mean": statistics.mean(pairs_per_repo), "median": statistics.median(pairs_per_repo),
+        }
+    else:
+        stats["pairs_per_repo"] = {"min": 0, "max": 0, "mean": 0, "median": 0}
+
     # Assertion types (from create_qnas)
     at_counts = Counter(r.get("assertion_type", "unknown") for r in records)
     stats["assertion_types"] = at_counts.most_common()
+
+    # Target difficulty distribution
+    diff_counts = Counter(classify_target_difficulty(r.get("target", "")) for r in records)
+    stats["target_difficulty"] = diff_counts.most_common()
 
     # Prefix / target lengths (in characters and lines)
     prefix_chars = [len(r.get("prefix", "")) for r in records]
@@ -118,6 +188,29 @@ def compute_stats(records: list[dict]) -> dict:
     multiline = sum(1 for r in records if r.get("metadata", {}).get("was_multiline", False))
     stats["multiline_count"] = multiline
     stats["multiline_pct"] = 100.0 * multiline / len(records) if records else 0
+
+    # Prefix quality: imports present?
+    has_import = sum(1 for r in records if "import " in r.get("prefix", "")[:500])
+    stats["has_import_count"] = has_import
+    stats["has_import_pct"] = 100.0 * has_import / len(records) if records else 0
+
+    # Prefix type (structured vs original)
+    prefix_type_counts = Counter(
+        r.get("metadata", {}).get("prefix_type", "original") for r in records
+    )
+    stats["prefix_types"] = prefix_type_counts.most_common()
+
+    # Assertion depth (line number in file)
+    depths = [r.get("metadata", {}).get("cut_line", 0) for r in records
+              if r.get("metadata", {}).get("cut_line")]
+    depths = [d for d in depths if isinstance(d, (int, float)) and d > 0]
+    if depths:
+        stats["assertion_depth"] = {
+            "min": min(depths), "max": max(depths),
+            "mean": statistics.mean(depths), "median": statistics.median(depths),
+        }
+    else:
+        stats["assertion_depth"] = {"min": 0, "max": 0, "mean": 0, "median": 0}
 
     return stats
 
@@ -312,8 +405,23 @@ def generate_html(records: list[dict], stats: dict, max_display: int = 200) -> s
     {make_stat_table(stats['target_lines'])}
   </div>
   <div class="stats-card">
-    <h3>Multiline Targets</h3>
-    <p>{stats['multiline_count']:,} / {stats['total']:,} targets were multiline ({stats['multiline_pct']:.1f}%)</p>
+    <h3>Target Difficulty</h3>
+    {make_bar(stats['target_difficulty'])}
+  </div>
+  <div class="stats-card">
+    <h3>Pairs per Repo</h3>
+    {make_stat_table(stats['pairs_per_repo'])}
+  </div>
+  <div class="stats-card">
+    <h3>Assertion Depth (line in file)</h3>
+    {make_stat_table(stats['assertion_depth'])}
+  </div>
+  <div class="stats-card">
+    <h3>Prefix Quality</h3>
+    <p><b>Imports present:</b> {stats['has_import_count']:,} / {stats['total']:,} ({stats['has_import_pct']:.1f}%)</p>
+    <p><b>Multiline targets:</b> {stats['multiline_count']:,} / {stats['total']:,} ({stats['multiline_pct']:.1f}%)</p>
+    <h3 style="margin-top:12px">Prefix Type</h3>
+    {make_bar(stats['prefix_types'])}
   </div>
 </div>
 
@@ -382,6 +490,12 @@ def main():
         description="Visualize Q&A pairs from create_qnas.py (QNA_HYPERNET.json)"
     )
     parser.add_argument(
+        "--split",
+        type=str,
+        default=None,
+        help="Path to split JSON (e.g. $SCRATCH/REPO_DATASET/cr_test_structured.json)",
+    )
+    parser.add_argument(
         "--qna",
         type=str,
         default=None,
@@ -425,7 +539,15 @@ def main():
     args = parser.parse_args()
 
     records = []
-    if args.qna:
+    if args.split:
+        path = args.split
+        if not os.path.isfile(path):
+            print(f"Error: Split file not found: {path}")
+            return 1
+        print(f"Loading from split {path} ...")
+        records = load_from_split(path, limit_repos=args.limit)
+        print(f"  Loaded {len(records):,} pairs.")
+    elif args.qna:
         path = args.qna
         if not os.path.isfile(path):
             print(f"Error: File not found: {path}")

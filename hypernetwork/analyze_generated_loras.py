@@ -104,7 +104,7 @@ def main():
                     help="Path to hypernet checkpoint (dir or .pt)")
     ap.add_argument("--splits-dir", type=str, default=default_dataset,
                     help="Dir with ir_test.json")
-    ap.add_argument("--split", type=str, default="ir_test")
+    ap.add_argument("--split", type=str, default="ir_test_structured")
     ap.add_argument("--limit-repos", type=int, default=None,
                     help="Use only first N repos (for quick testing)")
     ap.add_argument("--output", type=str, default=None,

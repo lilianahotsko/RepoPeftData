@@ -83,10 +83,10 @@ class PrefixTargetDataCollator(DataCollatorForLanguageModeling):
 
 
 def load_all_training_pairs(splits_dir: Path) -> list[dict]:
-    """Load all QnA pairs from train.json."""
-    path = splits_dir / "train.json"
+    """Load all QnA pairs from train_structured.json."""
+    path = splits_dir / "train_structured.json"
     if not path.exists():
-        raise FileNotFoundError(f"train.json not found at {splits_dir}")
+        raise FileNotFoundError(f"train_structured.json not found at {splits_dir}")
     data = json.loads(path.read_text(encoding="utf-8"))
     repos = data.get("repositories", {})
     pairs = []
@@ -127,7 +127,7 @@ def main():
     ap.add_argument("--max-seq-length", type=int, default=2048)
     ap.add_argument("--rank", type=int, default=16)
     ap.add_argument("--lora-alpha", type=int, default=32)
-    ap.add_argument("--val-split", type=str, default="cr_val")
+    ap.add_argument("--val-split", type=str, default="cr_val_structured")
     ap.add_argument("--no-wandb", action="store_true")
     ap.add_argument("--seed", type=int, default=3407)
     args = ap.parse_args()

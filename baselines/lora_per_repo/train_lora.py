@@ -209,7 +209,7 @@ def main():
     parser.add_argument(
         "--val-split",
         type=str,
-        default="ir_val",
+        default="ir_val_structured",
         help="When using --from-split: validation split (default: ir_val)",
     )
     parser.add_argument(

@@ -8,8 +8,7 @@
 #SBATCH --mem=80G
 #SBATCH --account=def-yuntian
 
-# Phase 5: Evaluate existing hypernetwork checkpoint on all splits.
-# Uses the already-trained checkpoint. ~1h on H100.
+# Phase 5: Evaluate existing hypernetwork checkpoint on structured splits.
 
 source scripts/slurm/common.sh
 mkdir -p slurm_logs
@@ -20,6 +19,6 @@ echo "Start: $(date)"
 python hypernetwork/hypernetwork_sampled_test.py \
     --checkpoint "$CKPT_DIR/HYPERNET/full_repos" \
     --splits-dir "$SPLITS_DIR" \
-    --splits cr_test cr_val ir_test ir_val
+    --splits cr_test_structured cr_val_structured ir_test_structured ir_val_structured
 
 echo "Phase 5 complete: $(date)"

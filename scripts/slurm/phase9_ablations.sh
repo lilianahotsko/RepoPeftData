@@ -16,7 +16,7 @@ source scripts/slurm/common.sh
 mkdir -p slurm_logs
 
 ABLATION_DIR="$CKPT_DIR/ABLATIONS"
-EVAL_SPLIT="cr_val"
+EVAL_SPLIT="cr_val_structured"
 
 run_ablation() {
     local name=$1

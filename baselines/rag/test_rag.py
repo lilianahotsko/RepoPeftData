@@ -82,7 +82,7 @@ def main():
     ap.add_argument("--splits-dir", type=str, default=default_dataset)
     ap.add_argument("--cache-dir", type=str, default=default_cache,
                     help="Dir with pre-built chunk indices (from build_indices.py)")
-    ap.add_argument("--split", type=str, default="cr_test")
+    ap.add_argument("--split", type=str, default="cr_test_structured")
     ap.add_argument("--model-name", type=str, default="Qwen/Qwen2.5-Coder-1.5B")
     ap.add_argument("--embed-model-name", type=str, default="Qwen/Qwen3-Embedding-0.6B")
     ap.add_argument("--top-k", type=int, default=5, help="Number of chunks to retrieve")

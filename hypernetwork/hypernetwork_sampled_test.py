@@ -126,8 +126,8 @@ def main():
                     help="Use only first N repos from the split")
     ap.add_argument("--repo", type=str, default=None,
                     help="Evaluate only this repo (e.g. 0xricksanchez/like-dbg)")
-    ap.add_argument("--split", type=str, default="cr_test",
-                    help="Split to evaluate (default: cr_test). Ignored if --splits is set.")
+    ap.add_argument("--split", type=str, default="cr_test_structured",
+                    help="Split to evaluate (default: cr_test_structured). Ignored if --splits is set.")
     ap.add_argument("--splits", type=str, nargs="+", default=None,
                     help="Multiple splits to evaluate (e.g. cr_test ir_test)")
     ap.add_argument("--device", type=str, default="cuda")

@@ -9,7 +9,7 @@
 #SBATCH --account=def-yuntian
 
 # Phase 7: Composable variants (additive, gated) + incremental adaptation.
-# ~10h on H100.
+# Uses structured splits.
 
 source scripts/slurm/common.sh
 mkdir -p slurm_logs
@@ -37,12 +37,12 @@ python hypernetwork/hypernetwork_composable.py \
     --max-files 30 \
     --epochs 3 --lr 1e-4
 
-# --- Incremental adaptation experiment (using weighted checkpoint from Phase 6) ---
+# --- Incremental adaptation experiment ---
 echo "--- Incremental adaptation ---"
 python hypernetwork/eval_incremental.py \
     --checkpoint "$CKPT_DIR/HYPERNET_COMPOSABLE_weighted" \
     --splits-dir "$SPLITS_DIR" \
-    --split cr_test \
+    --split cr_test_structured \
     --limit-repos 20 \
     --max-files-to-test 20
 
