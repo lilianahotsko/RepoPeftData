@@ -37,10 +37,12 @@ export PIP_CACHE_DIR=$SCRATCH/.cache/pip
 #     --output $SCRATCH/BASELINES/qwen_full.json \
 #     --split cr_test
 
-cd /home/lhotsko/RepoPeftData
-python hypernetwork/hypernetwork_sampled_test.py \
-    --checkpoint $SCRATCH/TRAINING_CHECKPOINTS/HYPERNET/full_repos \
-    --splits cr_test
+python baselines/rag/build_indices.py
+
+# cd /home/lhotsko/RepoPeftData
+# python hypernetwork/hypernetwork_sampled_test.py \
+#     --checkpoint $SCRATCH/TRAINING_CHECKPOINTS/HYPERNET/full_repos \
+#     --splits cr_test
 
 # python hypernetwork/hypernetwork.py \
 #     --train-json /scratch/lhotsko/overfit_split/train_qna_pairs/test_next_block.jsonl \

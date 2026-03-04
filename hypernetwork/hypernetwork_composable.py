@@ -479,8 +479,23 @@ def main():
 
     opt = torch.optim.AdamW(hypernet.parameters(), lr=sft_cfg.learning_rate, weight_decay=0.01)
 
-    save_cb = SaveHypernetCallback(hypernet, specs)
-    save_best_cb = SaveBestHypernetCallback(hypernet, specs)
+    # Wrap save callbacks to also persist composition config
+    class ComposableSaveCallback(SaveHypernetCallback):
+        def _payload(self):
+            p = super()._payload()
+            p["hypernet_config"]["composition"] = args.composition
+            p["hypernet_config"]["max_files"] = args.max_files
+            return p
+
+    class ComposableSaveBestCallback(SaveBestHypernetCallback):
+        def _payload(self):
+            p = super()._payload()
+            p["hypernet_config"]["composition"] = args.composition
+            p["hypernet_config"]["max_files"] = args.max_files
+            return p
+
+    save_cb = ComposableSaveCallback(hypernet, specs)
+    save_best_cb = ComposableSaveBestCallback(hypernet, specs)
 
     trainer = ComposableHypernetTrainer(
         model=model,

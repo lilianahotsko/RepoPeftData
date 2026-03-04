@@ -54,3 +54,8 @@ hypernetwork_checkpoints/*
 
 # Large report files
 report.html
+
+slurm_logs/
+PAW_CODE
+*.out
+*.err

@@ -13,4 +13,5 @@ source $SCRATCH/venvs/qwen-cu126-py312/bin/activate
 export PIP_CACHE_DIR=$SCRATCH/.cache/pip
 
 cd /home/lhotsko/RepoPeftData
-python repos_collection/clean_repos.py
+# python repos_collection/clean_repos.py
+python baselines/oracle_context/build_context.py
