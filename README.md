@@ -113,3 +113,58 @@ MIT License - feel free to use and modify for your research needs.
 # Notes:
 
 remove the tests which start with the ,
+
+
+
+
+  Repos processed: 726
+  Total extracted: 441658
+  Total selected:  65239
+  Imports present: 64810/65239 (99.3%)
+  Properly indented: 65239/65239 (100.0%)
+
+  Difficulty distribution:
+    numeric_literal: 14851 (22.8%)
+    variable: 14222 (21.8%)
+    string_literal: 11797 (18.1%)
+    collection: 7376 (11.3%)
+    complex_expr: 7168 (11.0%)
+    func_call: 5909 (9.1%)
+    none_literal: 2219 (3.4%)
+    bool_literal: 1697 (2.6%)
+
+  Assertion types:
+    assert: 48987 (75.1%)
+    self.assertEqual: 5638 (8.6%)
+    assert_*: 4835 (7.4%)
+    pytest.raises: 2615 (4.0%)
+    self.assertTrue: 729 (1.1%)
+    self.assertIn: 400 (0.6%)
+    self.assertRaises: 393 (0.6%)
+    self.assertFalse: 267 (0.4%)
+    self.assertIsInstance: 265 (0.4%)
+    self.assertIsNotNone: 169 (0.3%)
+    pytest.approx: 168 (0.3%)
+    self.assertIsNone: 134 (0.2%)
+    self.assertListEqual: 83 (0.1%)
+    self.assertNotEqual: 75 (0.1%)
+    self.assertIs: 73 (0.1%)
+    self.assertGreater: 61 (0.1%)
+    self.assertSequenceEqual: 56 (0.1%)
+    self.assertNotIn: 53 (0.1%)
+    self.assertAlmostEqual: 52 (0.1%)
+    self.assertLess: 27 (0.0%)
+    self.assertRaisesRegex: 25 (0.0%)
+    self.assertDictEqual: 24 (0.0%)
+    self.assertGreaterEqual: 22 (0.0%)
+    self.assertRegex: 21 (0.0%)
+    self.assertIsNot: 20 (0.0%)
+    self.assertLessEqual: 19 (0.0%)
+    self.assertCountEqual: 18 (0.0%)
+    self.assertMultiLineEqual: 4 (0.0%)
+    self.assertSetEqual: 2 (0.0%)
+    self.assertNotIsInstance: 2 (0.0%)
+    self.assertNotAlmostEqual: 1 (0.0%)
+    self.assertLogs: 1 (0.0%)
+[lhotsko@g23.nibi RepoPeftData]$ 
+

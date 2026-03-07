@@ -214,9 +214,9 @@ def load_from_splits(
                 })
         return items
 
-    train_items = load_split(splits_dir / "train_structured.json", limit_train_repos)
-    eval_items = load_split(splits_dir / "cr_val_structured.json", limit_eval_repos)
-    test_items = load_split(splits_dir / "cr_test_structured.json", limit_test_repos)
+    train_items = load_split(splits_dir / "train.json", limit_train_repos)
+    eval_items = load_split(splits_dir / "cr_val.json", limit_eval_repos)
+    test_items = load_split(splits_dir / "cr_test.json", limit_test_repos)
     return train_items, eval_items, test_items
 
 
@@ -858,7 +858,7 @@ def main():
         "REPO_DATASET",
     )
     ap.add_argument("--splits-dir", type=str, default=default_dataset,
-                    help="Dir with train_structured.json, cr_val_structured.json, etc.")
+                    help="Dir with train.json, cr_val.json, etc.")
     ap.add_argument("--limit-train-repos", type=int, default=None,
                     help="Use only first N repos from train.json (default: all)")
     ap.add_argument("--limit-eval-repos", type=int, default=None,

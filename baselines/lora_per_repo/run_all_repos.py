@@ -32,16 +32,16 @@ def main():
     ap.add_argument("--output-base", type=str, default=default_output)
     ap.add_argument("--limit-repos", type=int, default=None)
     ap.add_argument("--eval-only", action="store_true", help="Skip training, only evaluate")
-    ap.add_argument("--eval-split", type=str, default="ir_test_structured")
+    ap.add_argument("--eval-split", type=str, default="ir_test")
     ap.add_argument("--epochs", type=int, default=3)
     ap.add_argument("--no-wandb", action="store_true")
     args = ap.parse_args()
 
     splits_dir = Path(args.splits_dir).expanduser().resolve()
 
-    train_path = splits_dir / "train_structured.json"
+    train_path = splits_dir / "train.json"
     if not train_path.exists():
-        raise FileNotFoundError(f"train_structured.json not found at {splits_dir}")
+        raise FileNotFoundError(f"train.json not found at {splits_dir}")
     data = json.loads(train_path.read_text(encoding="utf-8"))
     repo_names = sorted(data.get("repositories", {}).keys())
     if args.limit_repos:

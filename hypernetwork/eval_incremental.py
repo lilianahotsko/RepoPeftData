@@ -25,7 +25,7 @@ import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from evaluation.metrics import postprocess_prediction, exact_match, edit_similarity, strip_comments
+from evaluation.metrics import postprocess_prediction, exact_match, edit_similarity, code_bleu_score, strip_comments
 from evaluation.data_utils import get_default_splits_dir, get_bos_id
 
 
@@ -35,7 +35,7 @@ def main():
 
     ap.add_argument("--checkpoint", type=str, required=True)
     ap.add_argument("--splits-dir", type=str, default=default_dataset)
-    ap.add_argument("--split", type=str, default="cr_test_structured")
+    ap.add_argument("--split", type=str, default="cr_test")
     ap.add_argument("--model-name", type=str, default="Qwen/Qwen2.5-Coder-1.5B")
     ap.add_argument("--max-new-tokens", type=int, default=256)
     ap.add_argument("--max-input-tokens", type=int, default=2048)

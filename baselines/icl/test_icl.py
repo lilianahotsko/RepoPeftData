@@ -51,23 +51,72 @@ def load_split_by_repo(splits_dir: Path, split_name: str) -> dict:
     return result
 
 
-def find_nearest_train_repo(test_embedding: list, train_repos: dict) -> str:
-    """Find the training repo with highest cosine similarity."""
+def find_nearest_train_repos(test_embedding: list, train_repos: dict, top_k: int = 5) -> list[str]:
+    """Find the top-k training repos by cosine similarity."""
+    if not test_embedding:
+        return []
     test_emb = torch.tensor(test_embedding, dtype=torch.float32)
     test_emb = F.normalize(test_emb.unsqueeze(0), p=2, dim=-1)
 
-    best_repo = None
-    best_sim = -1.0
+    sims = []
     for repo_name, r in train_repos.items():
         if r["embedding"] is None:
             continue
         train_emb = torch.tensor(r["embedding"], dtype=torch.float32)
         train_emb = F.normalize(train_emb.unsqueeze(0), p=2, dim=-1)
         sim = (test_emb @ train_emb.T).item()
-        if sim > best_sim:
-            best_sim = sim
-            best_repo = repo_name
-    return best_repo
+        sims.append((sim, repo_name))
+    sims.sort(key=lambda x: -x[0])
+    return [repo_name for _, repo_name in sims[:top_k]]
+
+
+def find_nearest_train_repo(test_embedding: list, train_repos: dict) -> str | None:
+    """Find the training repo with highest cosine similarity (legacy)."""
+    repos = find_nearest_train_repos(test_embedding, train_repos, top_k=1)
+    return repos[0] if repos else None
+
+
+@torch.no_grad()
+def embed_prefix(text: str, model, tokenizer, device: str, max_length: int = 512) -> torch.Tensor:
+    """Embed a prefix for retrieval (mean pooling, normalized)."""
+    text = text[-2000:]  # last 2000 chars for relevance
+    enc = tokenizer([text], padding=True, truncation=True, max_length=max_length, return_tensors="pt")
+    enc = {k: v.to(device) for k, v in enc.items()}
+    out = model(**enc)
+    mask = enc["attention_mask"].unsqueeze(-1)
+    mean = (out.last_hidden_state * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
+    return F.normalize(mean.cpu().float(), p=2, dim=-1)
+
+
+@torch.no_grad()
+def retrieve_examples_by_prefix(
+    query_prefix: str,
+    candidates: list[dict],
+    embed_model,
+    embed_tokenizer,
+    device: str,
+    n_shots: int,
+    batch_size: int = 32,
+) -> list[dict]:
+    """Retrieve top-n_shots examples by prefix embedding similarity."""
+    if not candidates:
+        return []
+    query_emb = embed_prefix(query_prefix, embed_model, embed_tokenizer, device)
+    sims = []
+    for i in range(0, len(candidates), batch_size):
+        batch = candidates[i : i + batch_size]
+        texts = [ex["prefix"][-2000:] for ex in batch]
+        enc = embed_tokenizer(texts, padding=True, truncation=True, max_length=512, return_tensors="pt")
+        enc = {k: v.to(device) for k, v in enc.items()}
+        out = embed_model(**enc)
+        mask = enc["attention_mask"].unsqueeze(-1)
+        means = (out.last_hidden_state * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
+        embs = F.normalize(means.cpu().float(), p=2, dim=-1)
+        s = (query_emb @ embs.T).squeeze(0)
+        for j, ex in enumerate(batch):
+            sims.append((s[j].item(), ex))
+    sims.sort(key=lambda x: -x[0])
+    return [ex for _, ex in sims[:n_shots]]
 
 
 def format_icl_prompt(prefix: str, examples: list[dict], n_shots: int, max_example_chars: int = 1000) -> str:
@@ -93,19 +142,24 @@ def main():
     default_dataset = get_default_splits_dir()
 
     ap.add_argument("--splits-dir", type=str, default=default_dataset)
-    ap.add_argument("--split", type=str, default="cr_test_structured")
+    ap.add_argument("--split", type=str, default="cr_test")
     ap.add_argument("--model-name", type=str, default="Qwen/Qwen2.5-Coder-1.5B")
     ap.add_argument("--n-shots", type=int, default=5, help="Number of few-shot examples")
     ap.add_argument("--max-new-tokens", type=int, default=128)
-    ap.add_argument("--max-input-tokens", type=int, default=4096)
+    ap.add_argument("--max-input-tokens", type=int, default=16384,
+                    help="Max input tokens (default 16384 for fair comparison with RAG/oracle)")
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--limit-repos", type=int, default=None)
     ap.add_argument("--output", type=str, default=None)
     ap.add_argument("--device", type=str, default="cuda")
     ap.add_argument("--seed", type=int, default=3407)
+    ap.add_argument("--embed-model-name", type=str, default="Qwen/Qwen3-Embedding-0.6B",
+                    help="Embedding model for retrieval-based example selection (CR only)")
+    ap.add_argument("--no-retrieval", action="store_true",
+                    help="Use random example selection instead of retrieval (ablation)")
     args = ap.parse_args()
 
-    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from transformers import AutoModelForCausalLM, AutoTokenizer, AutoModel
 
     random.seed(args.seed)
     splits_dir = Path(args.splits_dir).expanduser().resolve()
@@ -159,6 +213,7 @@ def main():
 
     # Pre-compute nearest train repos for CR evaluation
     nearest_cache = {}
+    top_repos_cache = {}
     if not is_ir:
         print("Finding nearest training repos for CR evaluation...")
         for repo in repo_names:
@@ -166,7 +221,19 @@ def main():
             if emb:
                 nearest = find_nearest_train_repo(emb, train_repos)
                 nearest_cache[repo] = nearest
+                top_repos = find_nearest_train_repos(emb, train_repos, top_k=5)
+                top_repos_cache[repo] = top_repos
                 print(f"  {repo} -> {nearest}")
+
+    # Load embedding model for retrieval-based ICL (CR only)
+    use_retrieval = not is_ir and not args.no_retrieval
+    embed_model = None
+    embed_tokenizer = None
+    if use_retrieval:
+        print(f"Loading embedding model for retrieval: {args.embed_model_name}")
+        embed_tokenizer = AutoTokenizer.from_pretrained(args.embed_model_name, use_fast=True)
+        embed_model = AutoModel.from_pretrained(args.embed_model_name, torch_dtype=torch.bfloat16)
+        embed_model.to(args.device).eval()
 
     em_count = 0
     bleu_sum = 0.0
@@ -186,17 +253,32 @@ def main():
         # Select few-shot examples
         if is_ir and repo in train_repos:
             example_pool = train_repos[repo]["pairs"]
+            candidates = [ex for ex in example_pool if ex["prefix"] != prefix]
+            if len(candidates) > args.n_shots:
+                examples = random.sample(candidates, args.n_shots)
+            else:
+                examples = candidates
+        elif use_retrieval and repo in top_repos_cache and embed_model is not None:
+            # CR with retrieval: pool from top-5 repos, rank by prefix similarity
+            candidate_pool = []
+            for rn in top_repos_cache[repo]:
+                if rn in train_repos:
+                    for ex in train_repos[rn]["pairs"]:
+                        if ex["prefix"] != prefix:
+                            candidate_pool.append(ex)
+            examples = retrieve_examples_by_prefix(
+                prefix, candidate_pool, embed_model, embed_tokenizer,
+                args.device, args.n_shots,
+            )
         elif repo in nearest_cache and nearest_cache[repo] in train_repos:
             example_pool = train_repos[nearest_cache[repo]]["pairs"]
+            candidates = [ex for ex in example_pool if ex["prefix"] != prefix]
+            if len(candidates) > args.n_shots:
+                examples = random.sample(candidates, args.n_shots)
+            else:
+                examples = candidates
         else:
-            example_pool = []
-
-        # Randomly sample examples (avoid using the exact same prefix)
-        candidates = [ex for ex in example_pool if ex["prefix"] != prefix]
-        if len(candidates) > args.n_shots:
-            examples = random.sample(candidates, args.n_shots)
-        else:
-            examples = candidates
+            examples = []
 
         icl_prompt = format_icl_prompt(prefix, examples, args.n_shots)
 
@@ -215,6 +297,7 @@ def main():
         gen_ids = out[0][len(input_ids):].tolist()
         pred = tok.decode(gen_ids, skip_special_tokens=True)
 
+        pred_raw = pred
         pred_clean = postprocess_prediction(pred, target)
         target_clean = strip_comments(target)
 
@@ -227,34 +310,40 @@ def main():
 
         entries.append({
             "repo": repo, "expected": target_clean, "got": pred_clean,
+            "got_raw": pred_raw,
             "exact_match": em, "code_bleu": bleu, "edit_similarity": edit_sim,
             "n_shots_used": len(examples),
         })
 
+        if (i + 1) % 50 == 0 or (i + 1) == n:
+            n_eval = len(entries)
+            _res = {
+                "method": f"icl_{args.n_shots}shot",
+                "split": args.split,
+                "exact_match_pct": 100.0 * em_count / n_eval,
+                "exact_match_count": em_count,
+                "n": n_eval, "n_total": n,
+                "code_bleu": bleu_sum / n_eval,
+                "edit_similarity": edit_sum / n_eval,
+                "config": {
+                    "n_shots": args.n_shots,
+                    "model_name": args.model_name,
+                    "use_retrieval": use_retrieval,
+                    "embed_model_name": args.embed_model_name if use_retrieval else None,
+                },
+                "entries": entries,
+            }
+            if args.output:
+                results_path = Path(args.output).expanduser().resolve()
+            else:
+                scratch = os.environ.get("SCRATCH", os.path.expanduser("~/scratch"))
+                results_path = Path(scratch) / "BASELINES" / f"icl_{args.n_shots}shot_{args.split}.json"
+            results_path.parent.mkdir(parents=True, exist_ok=True)
+            results_path.write_text(json.dumps(_res, indent=2), encoding="utf-8")
+
     exact_match_pct = 100.0 * em_count / n
     code_bleu_avg = bleu_sum / n
     edit_sim_avg = edit_sum / n
-
-    results = {
-        "method": f"icl_{args.n_shots}shot",
-        "split": args.split,
-        "exact_match_pct": exact_match_pct,
-        "exact_match_count": em_count,
-        "n": n,
-        "code_bleu": code_bleu_avg,
-        "edit_similarity": edit_sim_avg,
-        "config": {"n_shots": args.n_shots, "model_name": args.model_name},
-        "entries": entries,
-    }
-
-    if args.output:
-        results_path = Path(args.output).expanduser().resolve()
-    else:
-        scratch = os.environ.get("SCRATCH", os.path.expanduser("~/scratch"))
-        results_path = Path(scratch) / "BASELINES" / f"icl_{args.n_shots}shot_{args.split}.json"
-    results_path.parent.mkdir(parents=True, exist_ok=True)
-    results_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
-
     print("\n" + "=" * 60)
     print(f"ICL Baseline ({args.n_shots}-shot) on {args.split}")
     print("=" * 60)

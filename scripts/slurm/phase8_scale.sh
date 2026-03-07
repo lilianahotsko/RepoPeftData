@@ -34,12 +34,12 @@ python hypernetwork/hypernetwork_sampled_test.py \
     --checkpoint "$OUT_05B" \
     --model-name "$MODEL_05B" \
     --splits-dir "$SPLITS_DIR" \
-    --split cr_test_structured
+    --split cr_test
 
 python baselines/pretrained/test_qwen_coder.py \
     --model-name "$MODEL_05B" \
-    --splits-dir "$SPLITS_DIR" --split cr_test_structured \
-    --output "$BASELINES_DIR/pretrained_0.5B_cr_test_structured.json"
+    --splits-dir "$SPLITS_DIR" --split cr_test \
+    --output "$BASELINES_DIR/pretrained_0.5B_cr_test.json"
 
 # --- 3B ---
 echo "--- Scale: 3B ---"
@@ -58,11 +58,11 @@ python hypernetwork/hypernetwork_sampled_test.py \
     --checkpoint "$OUT_3B" \
     --model-name "$MODEL_3B" \
     --splits-dir "$SPLITS_DIR" \
-    --split cr_test_structured
+    --split cr_test
 
 python baselines/pretrained/test_qwen_coder.py \
     --model-name "$MODEL_3B" \
-    --splits-dir "$SPLITS_DIR" --split cr_test_structured \
-    --output "$BASELINES_DIR/pretrained_3B_cr_test_structured.json"
+    --splits-dir "$SPLITS_DIR" --split cr_test \
+    --output "$BASELINES_DIR/pretrained_3B_cr_test.json"
 
 echo "Phase 8 complete: $(date)"

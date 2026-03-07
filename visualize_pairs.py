@@ -250,16 +250,42 @@ def generate_html(records: list[dict], stats: dict, max_display: int = 200) -> s
     sample_cards = []
     for i, r in enumerate(display_records):
         meta = r.get("metadata", {})
-        prefix_code = html.escape(r.get("prefix", ""))
-        target_code = html.escape(r.get("target", ""))
         prefix_full = r.get("prefix", "")
+        target = r.get("target", "")
         prefix_lines_list = prefix_full.split("\n")
-        if len(prefix_lines_list) > 30:
-            prefix_short = "\n".join(
-                ["... (truncated, showing last 30 lines) ...", ""] + prefix_lines_list[-30:]
-            )
+        cut_line = meta.get("cut_line", meta.get("lineno", "?"))
+
+        # Build the "original file view": last lines of prefix + CUT + target
+        # Show last 20 lines of prefix as the local context around the assertion
+        context_window = 20
+        if len(prefix_lines_list) > context_window:
+            visible_prefix_lines = prefix_lines_list[-context_window:]
+            ellipsis = f"... ({len(prefix_lines_list) - context_window} lines above) ..."
         else:
-            prefix_short = prefix_full
+            visible_prefix_lines = prefix_lines_list
+            ellipsis = ""
+
+        # The last line of prefix is the assertion up to the cut point
+        # Reconstruct: prefix_end + [TARGET] + rest
+        cut_display_parts = []
+        if ellipsis:
+            cut_display_parts.append(ellipsis)
+        for line in visible_prefix_lines[:-1]:
+            cut_display_parts.append(html.escape(line))
+        # Last line: assertion up to cut, then highlighted target
+        last_prefix_line = visible_prefix_lines[-1] if visible_prefix_lines else ""
+        cut_display_parts.append(
+            html.escape(last_prefix_line)
+            + '<span class="cut-marker">|</span>'
+            + '<span class="target-highlight">'
+            + html.escape(target)
+            + '</span>'
+        )
+        cut_view_html = "\n".join(cut_display_parts)
+
+        # Full structured prefix (for expandable details)
+        prefix_code = html.escape(prefix_full)
+        target_code = html.escape(target)
 
         card = f"""
         <div class="card" data-repo="{html.escape(r.get('repo',''))}"
@@ -269,17 +295,18 @@ def generate_html(records: list[dict], stats: dict, max_display: int = 200) -> s
             <span class="card-num">#{i+1}</span>
             <span class="card-repo">{html.escape(r.get('repo',''))}</span>
             <span class="card-file">{html.escape(meta.get('file',''))}</span>
-            <span class="card-func">{html.escape(str(meta.get('function','') or ''))}</span>
-            <span class="card-cut">{html.escape(r.get('assertion_type',''))} @ line {meta.get('cut_line','?')}</span>
+            <span class="card-func">{html.escape(str(meta.get('function', meta.get('test_function','')) or ''))}</span>
+            <span class="card-cut">{html.escape(r.get('assertion_type',''))} @ line {cut_line}</span>
             <span class="card-fw badge">{html.escape(r.get('assertion_type',''))}</span>
             <span class="card-toggle">&#9660;</span>
           </div>
           <div class="card-body" style="display:none;">
-            <div class="pair-container">
+            <div class="section-label">Original file context (cut at line {cut_line})</div>
+            <pre><code>{cut_view_html}</code></pre>
+            <div class="pair-container" style="margin-top:12px;">
               <div class="pair-section prefix-section">
-                <div class="section-label">PREFIX (input)</div>
-                <pre><code>{html.escape(prefix_short)}</code></pre>
-                {"<details><summary>Show full prefix (" + str(len(prefix_lines_list)) + " lines)</summary><pre><code>" + prefix_code + "</code></pre></details>" if len(prefix_lines_list) > 30 else ""}
+                <div class="section-label">STRUCTURED PREFIX (model input, {len(prefix_lines_list)} lines)</div>
+                <details><summary>Show full prefix</summary><pre><code>{prefix_code}</code></pre></details>
               </div>
               <div class="arrow">&#10142;</div>
               <div class="pair-section target-section">
@@ -289,9 +316,10 @@ def generate_html(records: list[dict], stats: dict, max_display: int = 200) -> s
             </div>
             <div class="meta-info">
               <span><b>Assertion type:</b> {html.escape(r.get('assertion_type',''))}</span>
-              <span><b>Was multiline:</b> {meta.get('was_multiline', False)}</span>
-              <span><b>Prefix:</b> {len(r.get('prefix',''))} chars, {r.get('prefix','').count(chr(10))+1} lines</span>
-              <span><b>Target:</b> {len(r.get('target',''))} chars, {r.get('target','').count(chr(10))+1} lines</span>
+              <span><b>Difficulty:</b> {html.escape(r.get('difficulty', classify_target_difficulty(target)))}</span>
+              <span><b>Line:</b> {cut_line}</span>
+              <span><b>Prefix:</b> {len(prefix_full)} chars, {len(prefix_lines_list)} lines</span>
+              <span><b>Target:</b> {len(target)} chars</span>
             </div>
           </div>
         </div>
@@ -369,6 +397,9 @@ def generate_html(records: list[dict], stats: dict, max_display: int = 200) -> s
   code {{ font-family: 'Fira Code', 'Cascadia Code', 'JetBrains Mono', Consolas, monospace; }}
   details {{ margin-top: 6px; }}
   details summary {{ color: var(--accent); cursor: pointer; font-size: 0.85em; }}
+  .cut-marker {{ color: #f85149; font-weight: 900; font-size: 1.2em; animation: blink 1s step-end infinite; }}
+  @keyframes blink {{ 50% {{ opacity: 0; }} }}
+  .target-highlight {{ background: #2ea04340; color: #3fb950; border-radius: 3px; padding: 0 2px; }}
   .meta-info {{ display: flex; gap: 18px; flex-wrap: wrap; margin-top: 10px; font-size: 0.82em; color: var(--text-dim); }}
 
   @media (max-width: 900px) {{

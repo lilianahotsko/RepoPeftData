@@ -15,10 +15,11 @@ echo "===== ICL baseline ====="
 echo "Start: $(date)"
 
 for shots in 3 5; do
-    echo "--- ICL ${shots}-shot (cr_test_structured) ---"
+    echo "--- ICL ${shots}-shot (cr_test) ---"
     python baselines/icl/test_icl.py \
-        --splits-dir "$SPLITS_DIR" --split cr_test_structured --n-shots $shots \
-        --output "$BASELINES_DIR/icl_${shots}shot_cr_test_structured.json"
+        --splits-dir "$SPLITS_DIR" --split cr_test --n-shots $shots \
+        --max-input-tokens 16384 \
+        --output "$BASELINES_DIR/icl_${shots}shot_cr_test.json"
 done
 
 echo "Done: $(date)"

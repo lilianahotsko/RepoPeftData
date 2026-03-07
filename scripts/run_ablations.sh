@@ -16,7 +16,7 @@ ABLATION=${1:-"all"}
 SCRATCH=${SCRATCH:-$HOME/scratch}
 SPLITS_DIR="$SCRATCH/REPO_DATASET"
 BASE_OUTPUT="$SCRATCH/TRAINING_CHECKPOINTS/ABLATIONS"
-EVAL_SPLIT="cr_val_structured"
+EVAL_SPLIT="cr_val"
 
 run_ablation() {
     local name=$1

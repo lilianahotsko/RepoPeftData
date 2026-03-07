@@ -21,13 +21,13 @@ python baselines/rag/build_indices.py \
     --cache-dir "$SCRATCH/RAG_CHUNK_CACHE"
 
 for k in 3 5 10; do
-    echo "--- RAG top-$k (cr_test_structured) ---"
+    echo "--- RAG top-$k (cr_test) ---"
     python baselines/rag/test_rag.py \
         --splits-dir "$SPLITS_DIR" \
         --cache-dir "$SCRATCH/RAG_CHUNK_CACHE" \
-        --split cr_test_structured --top-k $k \
+        --split cr_test --top-k $k \
         --max-input-tokens 16384 \
-        --output "$BASELINES_DIR/rag_top${k}_cr_test_structured.json"
+        --output "$BASELINES_DIR/rag_top${k}_cr_test.json"
 done
 
 echo "Done: $(date)"

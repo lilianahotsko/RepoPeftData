@@ -54,7 +54,10 @@ def retrieve_chunks(query_emb: torch.Tensor, index: dict, top_k: int = 5) -> lis
     """Retrieve top-k chunks by cosine similarity."""
     if not index["chunks"] or index["embeddings"] is None:
         return []
-    sims = (query_emb @ index["embeddings"].T).squeeze(0)
+    emb = index["embeddings"]
+    if query_emb.dtype != emb.dtype:
+        query_emb = query_emb.to(emb.dtype)
+    sims = (query_emb @ emb.T).squeeze(0)
     k = min(top_k, len(index["chunks"]))
     _, top_indices = sims.topk(k)
     return [index["chunks"][i] for i in top_indices.tolist()]
@@ -82,7 +85,7 @@ def main():
     ap.add_argument("--splits-dir", type=str, default=default_dataset)
     ap.add_argument("--cache-dir", type=str, default=default_cache,
                     help="Dir with pre-built chunk indices (from build_indices.py)")
-    ap.add_argument("--split", type=str, default="cr_test_structured")
+    ap.add_argument("--split", type=str, default="cr_test")
     ap.add_argument("--model-name", type=str, default="Qwen/Qwen2.5-Coder-1.5B")
     ap.add_argument("--embed-model-name", type=str, default="Qwen/Qwen3-Embedding-0.6B")
     ap.add_argument("--top-k", type=int, default=5, help="Number of chunks to retrieve")
@@ -184,6 +187,7 @@ def main():
         gen_ids = out[0][len(input_ids):].tolist()
         pred = tok.decode(gen_ids, skip_special_tokens=True)
 
+        pred_raw = pred
         pred_clean = postprocess_prediction(pred, target)
         target_clean = strip_comments(target)
 
@@ -196,39 +200,42 @@ def main():
 
         entries.append({
             "repo": repo, "expected": target_clean, "got": pred_clean,
+            "got_raw": pred_raw,
             "exact_match": em, "code_bleu": bleu, "edit_similarity": edit_sim,
             "n_retrieved": len(retrieved),
         })
 
+        # Write after every 50 examples so partial results survive crashes
+        if (i + 1) % 50 == 0 or (i + 1) == n:
+            n_eval = len(entries)
+            results = {
+                "method": f"rag_top{args.top_k}",
+                "split": args.split,
+                "exact_match_pct": 100.0 * em_count / n_eval,
+                "exact_match_count": em_count,
+                "n": n_eval,
+                "n_total": n,
+                "code_bleu": bleu_sum / n_eval,
+                "edit_similarity": edit_sum / n_eval,
+                "config": {
+                    "top_k": args.top_k,
+                    "max_input_tokens": args.max_input_tokens,
+                    "model_name": args.model_name,
+                    "embed_model_name": args.embed_model_name,
+                },
+                "entries": entries,
+            }
+            if args.output:
+                results_path = Path(args.output).expanduser().resolve()
+            else:
+                scratch = os.environ.get("SCRATCH", os.path.expanduser("~/scratch"))
+                results_path = Path(scratch) / "BASELINES" / f"rag_top{args.top_k}_{args.split}.json"
+            results_path.parent.mkdir(parents=True, exist_ok=True)
+            results_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
+
     exact_match_pct = 100.0 * em_count / n
     code_bleu_avg = bleu_sum / n
     edit_sim_avg = edit_sum / n
-
-    results = {
-        "method": f"rag_top{args.top_k}",
-        "split": args.split,
-        "exact_match_pct": exact_match_pct,
-        "exact_match_count": em_count,
-        "n": n,
-        "code_bleu": code_bleu_avg,
-        "edit_similarity": edit_sim_avg,
-        "config": {
-            "top_k": args.top_k,
-            "max_input_tokens": args.max_input_tokens,
-            "model_name": args.model_name,
-            "embed_model_name": args.embed_model_name,
-        },
-        "entries": entries,
-    }
-
-    if args.output:
-        results_path = Path(args.output).expanduser().resolve()
-    else:
-        scratch = os.environ.get("SCRATCH", os.path.expanduser("~/scratch"))
-        results_path = Path(scratch) / "BASELINES" / f"rag_top{args.top_k}_{args.split}.json"
-    results_path.parent.mkdir(parents=True, exist_ok=True)
-    results_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
-
     print("\n" + "=" * 60)
     print(f"RAG Baseline (top-{args.top_k}) on {args.split}")
     print("=" * 60)

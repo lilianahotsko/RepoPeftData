@@ -3,6 +3,7 @@ Shared evaluation metrics for RepoPeftBench.
 Used by all baselines and the hypernetwork evaluation scripts.
 """
 
+import re
 import warnings
 from difflib import SequenceMatcher
 
@@ -10,6 +11,9 @@ FIM_TOKENS = ("<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>")
 
 _CODEBLEU_AVAILABLE = None
 _CODEBLEU_WARNED = False
+
+# Regex tokenizer for Python code (splits on identifiers, operators, literals)
+_CODE_TOKEN_RE = re.compile(r"[a-zA-Z_]\w*|0[xXoObB][\da-fA-F_]+|\d[\d_]*\.?\d*[eE]?[\d_]*|\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'|[^\s]")
 
 
 def strip_fim_tokens(s: str) -> str:
@@ -71,19 +75,51 @@ def _check_codebleu():
     return _CODEBLEU_AVAILABLE
 
 
+def _tokenize_code(s: str) -> list[str]:
+    """Tokenize Python code into identifiers, operators, literals."""
+    return _CODE_TOKEN_RE.findall(s)
+
+
+def _ngram_bleu(pred_tokens: list[str], ref_tokens: list[str], max_n: int = 4) -> float:
+    """Compute smoothed BLEU on token lists (no external deps)."""
+    from collections import Counter
+    import math
+
+    if not pred_tokens or not ref_tokens:
+        return 0.0
+
+    brevity = min(1.0, len(pred_tokens) / len(ref_tokens))
+    log_bleu = 0.0
+    for n in range(1, max_n + 1):
+        pred_ngrams = Counter(tuple(pred_tokens[i:i+n]) for i in range(len(pred_tokens) - n + 1))
+        ref_ngrams = Counter(tuple(ref_tokens[i:i+n]) for i in range(len(ref_tokens) - n + 1))
+        matches = sum(min(pred_ngrams[ng], ref_ngrams[ng]) for ng in pred_ngrams)
+        total = max(len(pred_tokens) - n + 1, 1)
+        # +1 smoothing (Chen & Cherry, 2014)
+        precision = (matches + 1) / (total + 1)
+        log_bleu += math.log(precision) / max_n
+
+    return brevity * math.exp(log_bleu)
+
+
 def code_bleu_score(pred: str, ref: str, lang: str = "python") -> float:
-    """Compute CodeBLEU. Returns 0.0 if codebleu package is unavailable."""
-    if not _check_codebleu():
+    """
+    Compute code similarity score.
+    Tries codebleu package first; falls back to tokenized BLEU (no external deps).
+    """
+    if not pred.strip() or not ref.strip():
         return 0.0
-    try:
-        from codebleu import calc_codebleu
-        if not pred.strip() or not ref.strip():
-            return 0.0
-        result = calc_codebleu([ref], [pred], lang=lang)
-        return result["codebleu"]
-    except Exception as e:
-        warnings.warn(f"CodeBLEU computation failed: {e}", stacklevel=2)
-        return 0.0
+
+    if _check_codebleu():
+        try:
+            from codebleu import calc_codebleu
+            result = calc_codebleu([ref], [pred], lang=lang)
+            return result["codebleu"]
+        except Exception:
+            pass
+
+    # Fallback: tokenized BLEU on code tokens
+    return _ngram_bleu(_tokenize_code(pred), _tokenize_code(ref))
 
 
 def postprocess_prediction(pred: str, target: str) -> str:

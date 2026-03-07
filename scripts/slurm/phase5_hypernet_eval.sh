@@ -19,6 +19,6 @@ echo "Start: $(date)"
 python hypernetwork/hypernetwork_sampled_test.py \
     --checkpoint "$CKPT_DIR/HYPERNET/full_repos" \
     --splits-dir "$SPLITS_DIR" \
-    --splits cr_test_structured cr_val_structured ir_test_structured ir_val_structured
+    --splits cr_test cr_val ir_test ir_val
 
 echo "Phase 5 complete: $(date)"

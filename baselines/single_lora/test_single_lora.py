@@ -65,7 +65,7 @@ def main():
 
     ap.add_argument("--adapter", type=str, required=True, help="Path to single LoRA adapter")
     ap.add_argument("--splits-dir", type=str, default=default_dataset)
-    ap.add_argument("--split", type=str, default="cr_test_structured")
+    ap.add_argument("--split", type=str, default="cr_test")
     ap.add_argument("--model-name", type=str, default="Qwen/Qwen2.5-Coder-1.5B")
     ap.add_argument("--max-new-tokens", type=int, default=128)
     ap.add_argument("--max-input-tokens", type=int, default=2048)
@@ -146,28 +146,23 @@ def main():
                 "exact_match": em, "code_bleu": bleu, "edit_similarity": edit_sim,
             })
 
-    exact_match_pct = 100.0 * em_count / n
-    code_bleu_avg = bleu_sum / n
-    edit_sim_avg = edit_sum / n
-
-    results = {
-        "method": "single_lora",
-        "split": args.split,
-        "exact_match_pct": exact_match_pct,
-        "exact_match_count": em_count,
-        "n": n,
-        "code_bleu": code_bleu_avg,
-        "edit_similarity": edit_sim_avg,
-        "entries": entries,
-    }
-
-    if args.output:
-        results_path = Path(args.output).expanduser().resolve()
-    else:
-        scratch = os.environ.get("SCRATCH", os.path.expanduser("~/scratch"))
-        results_path = Path(scratch) / "BASELINES" / f"single_lora_{args.split}.json"
-    results_path.parent.mkdir(parents=True, exist_ok=True)
-    results_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
+        n_eval = len(entries)
+        _res = {
+            "method": "single_lora", "split": args.split,
+            "exact_match_pct": 100.0 * em_count / n_eval,
+            "exact_match_count": em_count,
+            "n": n_eval, "n_total": n,
+            "code_bleu": bleu_sum / n_eval,
+            "edit_similarity": edit_sum / n_eval,
+            "entries": entries,
+        }
+        if args.output:
+            results_path = Path(args.output).expanduser().resolve()
+        else:
+            scratch = os.environ.get("SCRATCH", os.path.expanduser("~/scratch"))
+            results_path = Path(scratch) / "BASELINES" / f"single_lora_{args.split}.json"
+        results_path.parent.mkdir(parents=True, exist_ok=True)
+        results_path.write_text(json.dumps(_res, indent=2), encoding="utf-8")
 
     print("\n" + "=" * 60)
     print(f"Single LoRA Baseline on {args.split}")

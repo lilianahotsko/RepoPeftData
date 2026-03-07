@@ -15,56 +15,19 @@ Usage:
 import argparse
 import json
 import os
-from difflib import SequenceMatcher
+import sys
 from pathlib import Path
 
 import torch
 
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from evaluation.metrics import (
+    strip_fim_tokens, strip_comments, postprocess_prediction,
+    exact_match, edit_similarity, code_bleu_score,
+)
+from evaluation.data_utils import load_split as _shared_load_split
+
 TARGET_MARKER = "### Target:"
-FIM_TOKENS = ("<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>")
-
-
-def strip_fim_tokens(s: str) -> str:
-    for tok in FIM_TOKENS:
-        s = s.replace(tok, "")
-    return s.strip()
-
-
-def strip_comments(s: str) -> str:
-    return s.split("#")[0].strip()
-
-
-def normalize_for_match(s: str) -> str:
-    s = s.strip().rstrip(":, \t")
-    s = s.replace(", ", ",").replace(" ,", ",")
-    return " ".join(s.split())
-
-
-def _pred_candidates(pred: str, ref: str) -> list[str]:
-    candidates = [normalize_for_match(pred)]
-    if "," not in ref and "," in pred:
-        candidates.append(normalize_for_match(pred.split(",")[0]))
-    if len(ref.split()) == 1 and " " in pred:
-        candidates.append(normalize_for_match(pred.split()[0]))
-    return candidates
-
-
-def exact_match(pred: str, ref: str) -> bool:
-    norm_ref = normalize_for_match(ref)
-    return any(c == norm_ref for c in _pred_candidates(pred, ref))
-
-
-def edit_similarity(pred: str, ref: str) -> float:
-    return SequenceMatcher(None, pred, ref).ratio()
-
-
-def code_bleu_score(pred: str, ref: str, lang: str = "python") -> float:
-    try:
-        from codebleu import calc_codebleu
-        result = calc_codebleu([ref], [pred], lang=lang)
-        return result["codebleu"]
-    except Exception:
-        return 0.0
 
 
 def load_split(splits_dir: Path, split_name: str, limit_repos: int | None = None, repo_filter: str | None = None) -> list:
@@ -152,8 +115,8 @@ def main():
                     help="Path to LoRA adapter (e.g. ./lora-adapters/repo_slug/adapter)")
     ap.add_argument("--splits-dir", type=str, default=default_dataset,
                     help="Dir with ir_val.json, ir_test.json, etc.")
-    ap.add_argument("--split", type=str, default="ir_test_structured",
-                    help="Split to evaluate: ir_test_structured for final testing, ir_val_structured for validation (default: ir_test_structured)")
+    ap.add_argument("--split", type=str, default="ir_test",
+                    help="Split to evaluate: ir_test for final testing, ir_val for validation (default: ir_test)")
     ap.add_argument("--model-name", type=str, default="Qwen/Qwen2.5-Coder-1.5B")
     ap.add_argument("--max-new-tokens", type=int, default=128)
     ap.add_argument("--max-input-tokens", type=int, default=2048)
@@ -247,11 +210,7 @@ def main():
 
         for it, pred in zip(batch_items, preds):
             target = it["target"]
-            pred = strip_fim_tokens(pred)
-            if "\n" not in target and "\n" in pred:
-                pred = pred.split("\n")[0]
-
-            pred_clean = strip_comments(pred)
+            pred_clean = postprocess_prediction(pred, target)
             target_clean = strip_comments(target)
 
             em = exact_match(pred_clean, target_clean)

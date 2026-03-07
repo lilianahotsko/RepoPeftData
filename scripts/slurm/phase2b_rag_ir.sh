@@ -15,13 +15,13 @@ echo "===== RAG baseline (IR test) ====="
 echo "Start: $(date)"
 
 for k in 3 5 10; do
-    echo "--- RAG top-$k (ir_test_structured) ---"
+    echo "--- RAG top-$k (ir_test) ---"
     python baselines/rag/test_rag.py \
         --splits-dir "$SPLITS_DIR" \
         --cache-dir "$SCRATCH/RAG_CHUNK_CACHE" \
-        --split ir_test_structured --top-k $k \
+        --split ir_test --top-k $k \
         --max-input-tokens 16384 \
-        --output "$BASELINES_DIR/rag_top${k}_ir_test_structured.json"
+        --output "$BASELINES_DIR/rag_top${k}_ir_test.json"
 done
 
 echo "Done: $(date)"

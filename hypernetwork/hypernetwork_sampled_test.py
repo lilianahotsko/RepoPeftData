@@ -16,7 +16,6 @@ import argparse
 import json
 import os
 import sys
-from difflib import SequenceMatcher
 from pathlib import Path
 
 import torch
@@ -24,110 +23,32 @@ import torch.nn.functional as F
 
 # Import from hypernetwork_sampled (after torch to avoid trl deps for --help)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-
-
-FIM_TOKENS = ("<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>")
-
-
-def strip_fim_tokens(s: str) -> str:
-    """Remove Qwen FIM special tokens from model output."""
-    for tok in FIM_TOKENS:
-        s = s.replace(tok, "")
-    return s.strip()
-
-
-def strip_comments(s: str) -> str:
-    """Remove Python comments (everything after #)."""
-    return s.split("#")[0].strip()
-
-
-def normalize_for_match(s: str) -> str:
-    """Normalize string for exact match comparison."""
-    s = s.strip().rstrip(":, \t")
-    s = s.replace(", ", ",").replace(" ,", ",")
-    return " ".join(s.split())
-
-
-def _pred_candidates(pred: str, ref: str) -> list[str]:
-    """Return candidate pred strings to try for relaxed match."""
-    candidates = [normalize_for_match(pred)]
-    if "," not in ref and "," in pred:
-        candidates.append(normalize_for_match(pred.split(",")[0]))
-    if len(ref.split()) == 1 and " " in pred:
-        candidates.append(normalize_for_match(pred.split()[0]))
-    return candidates
-
-
-def exact_match(pred: str, ref: str) -> bool:
-    """Exact match with relaxed postprocessing for common model overgeneration."""
-    norm_ref = normalize_for_match(ref)
-    return any(c == norm_ref for c in _pred_candidates(pred, ref))
-
-
-def edit_similarity(pred: str, ref: str) -> float:
-    """Edit similarity in [0, 1]. 1 = identical."""
-    return SequenceMatcher(None, pred, ref).ratio()
-
-
-def code_bleu_score(pred: str, ref: str, lang: str = "python") -> float:
-    """Code BLEU if codebleu available, else 0."""
-    try:
-        from codebleu import calc_codebleu
-        result = calc_codebleu([ref], [pred], lang=lang)
-        return result["codebleu"]
-    except Exception:
-        return 0.0
-
-
-def load_split(splits_dir: Path, split_name: str, limit_repos: int | None = None, repo_filter: str | None = None) -> list:
-    """Load split JSON (e.g. cr_test.json). Returns list of {repo, prefix, target, embedding}."""
-    path = splits_dir / f"{split_name}.json"
-    if not path.exists():
-        return []
-    data = json.loads(path.read_text(encoding="utf-8"))
-    repos = data.get("repositories", {})
-    repo_names = sorted(repos.keys())
-    if repo_filter is not None:
-        repo_names = [r for r in repo_names if r == repo_filter]
-    elif limit_repos is not None and limit_repos > 0:
-        repo_names = repo_names[:limit_repos]
-    items = []
-    for repo in repo_names:
-        r = repos[repo]
-        pairs = r.get("qna_pairs", [])
-        emb = r.get("embedding")
-        if emb is None:
-            continue
-        for p in pairs:
-            prefix = p.get("prefix", "")
-            target = p.get("target", "")
-            if not prefix or not target:
-                continue
-            items.append({"repo": repo, "prefix": prefix, "target": target, "embedding": emb})
-    return items
+from evaluation.data_utils import get_default_splits_dir, load_split_with_embeddings
+from evaluation.metrics import (
+    strip_fim_tokens, strip_comments, postprocess_prediction,
+    exact_match, edit_similarity, code_bleu_score,
+)
 
 
 def main():
     ap = argparse.ArgumentParser(description="Evaluate hypernetwork on split JSON (cr_test, cr_val, etc.)")
-    default_dataset = os.path.join(
-        os.environ.get("SCRATCH", os.path.expanduser("~/scratch")),
-        "REPO_DATASET",
-    )
+    default_dataset = get_default_splits_dir()
     ap.add_argument("--checkpoint", type=str, required=True,
                     help="Path to hypernet_state.pt or output dir (uses last checkpoint)")
     ap.add_argument("--splits-dir", type=str, default=default_dataset,
                     help="Dir with cr_test.json, cr_val.json, etc.")
     ap.add_argument("--model-name", type=str, default="Qwen/Qwen2.5-Coder-1.5B")
     ap.add_argument("--max-new-tokens", type=int, default=256)
-    ap.add_argument("--max-input-tokens", type=int, default=2048)
+    ap.add_argument("--max-input-tokens", type=int, default=16384,
+                    help="Max input tokens (default 16384 for parity with baselines)")
     ap.add_argument("--limit", type=int, default=None,
                     help="Limit number of examples to evaluate")
     ap.add_argument("--limit-repos", type=int, default=None,
                     help="Use only first N repos from the split")
     ap.add_argument("--repo", type=str, default=None,
                     help="Evaluate only this repo (e.g. 0xricksanchez/like-dbg)")
-    ap.add_argument("--split", type=str, default="cr_test_structured",
-                    help="Split to evaluate (default: cr_test_structured). Ignored if --splits is set.")
+    ap.add_argument("--split", type=str, default="cr_test",
+                    help="Split to evaluate (default: cr_test). Ignored if --splits is set.")
     ap.add_argument("--splits", type=str, nargs="+", default=None,
                     help="Multiple splits to evaluate (e.g. cr_test ir_test)")
     ap.add_argument("--device", type=str, default="cuda")
@@ -223,7 +144,7 @@ def main():
         output_dir = results_root / split
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        items = load_split(splits_dir, split, limit_repos=args.limit_repos, repo_filter=args.repo)
+        items = load_split_with_embeddings(splits_dir, split, limit_repos=args.limit_repos, repo_filter=args.repo)
         if args.limit is not None and args.limit > 0:
             items = items[: args.limit]
         if not items:
@@ -269,12 +190,7 @@ def main():
             gen_ids = out[0][len(input_ids) :].tolist()
             pred = tok.decode(gen_ids, skip_special_tokens=True)
 
-            pred = strip_fim_tokens(pred)
-            # Stop at newline if target is single-line (common for assertions)
-            if "\n" not in target and "\n" in pred:
-                pred = pred.split("\n")[0]
-
-            pred_clean = strip_comments(pred)
+            pred_clean = postprocess_prediction(pred, target)
             target_clean = strip_comments(target)
 
             em = exact_match(pred_clean, target_clean)
@@ -293,21 +209,23 @@ def main():
                 "edit_similarity": edit_sim,
             })
 
+            if (i + 1) % 50 == 0 or (i + 1) == n:
+                n_eval = len(entries)
+                results = {
+                    "exact_match_pct": 100.0 * em_count / n_eval,
+                    "exact_match_count": em_count,
+                    "n": n_eval,
+                    "n_total": n,
+                    "code_bleu": bleu_sum / n_eval,
+                    "edit_similarity": edit_sum / n_eval,
+                    "entries": entries,
+                }
+                results_path = output_dir / "results.json"
+                results_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
+
         exact_match_pct = 100.0 * em_count / n
         code_bleu_avg = bleu_sum / n
         edit_sim_avg = edit_sum / n
-
-        results = {
-            "exact_match_pct": exact_match_pct,
-            "exact_match_count": em_count,
-            "n": n,
-            "code_bleu": code_bleu_avg,
-            "edit_similarity": edit_sim_avg,
-            "entries": entries,
-        }
-        results_path = output_dir / "results.json"
-        results_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
-
         print("\n" + "=" * 60)
         print(f"Results on {split}.json")
         print("=" * 60)

@@ -22,7 +22,7 @@ python baselines/lora_per_repo/run_all_repos.py \
     --splits-dir "$SPLITS_DIR" \
     --output-base "$CKPT_DIR/PER_REPO_LORA" \
     --limit-repos 30 \
-    --eval-split ir_test_structured \
+    --eval-split ir_test \
     --epochs 3 \
     --no-wandb
 

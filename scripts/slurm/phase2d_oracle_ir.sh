@@ -17,8 +17,8 @@ echo "Start: $(date)"
 python baselines/oracle_context/test_oracle_context.py \
     --splits-dir "$SPLITS_DIR" \
     --cache-dir "$SCRATCH/ORACLE_CONTEXT_CACHE" \
-    --split ir_test_structured \
+    --split ir_test \
     --max-input-tokens 16384 \
-    --output "$BASELINES_DIR/oracle_context_ir_test_structured.json"
+    --output "$BASELINES_DIR/oracle_context_ir_test.json"
 
 echo "Done: $(date)"

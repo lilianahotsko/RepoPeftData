@@ -42,7 +42,7 @@ echo "--- Incremental adaptation ---"
 python hypernetwork/eval_incremental.py \
     --checkpoint "$CKPT_DIR/HYPERNET_COMPOSABLE_weighted" \
     --splits-dir "$SPLITS_DIR" \
-    --split cr_test_structured \
+    --split cr_test \
     --limit-repos 20 \
     --max-files-to-test 20
 

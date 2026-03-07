@@ -13,97 +13,17 @@ Usage:
 import argparse
 import json
 import os
-from difflib import SequenceMatcher
+import sys
 from pathlib import Path
 
 import torch
 
-
-FIM_TOKENS = ("<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>")
-
-
-def strip_fim_tokens(s: str) -> str:
-    """Remove Qwen FIM special tokens from model output."""
-    for tok in FIM_TOKENS:
-        s = s.replace(tok, "")
-    return s.strip()
-
-
-def strip_comments(s: str) -> str:
-    """Remove Python comments (everything after #)."""
-    return s.split("#")[0].strip()
-
-
-def normalize_for_match(s: str) -> str:
-    """Normalize string for exact match comparison."""
-    s = s.strip().rstrip(":, \t")
-    s = s.replace(", ", ",").replace(" ,", ",")
-    return " ".join(s.split())
-
-
-def _pred_candidates(pred: str, ref: str) -> list[str]:
-    """Return candidate pred strings to try for relaxed match."""
-    candidates = [normalize_for_match(pred)]
-    # If ref has no comma but pred does, try part before comma (model added extra)
-    if "," not in ref and "," in pred:
-        candidates.append(normalize_for_match(pred.split(",")[0]))
-    # If ref is single token, try first token of pred (model added extra words)
-    if len(ref.split()) == 1 and " " in pred:
-        candidates.append(normalize_for_match(pred.split()[0]))
-    return candidates
-
-
-def exact_match(pred: str, ref: str) -> bool:
-    """Exact match with relaxed postprocessing for common model overgeneration."""
-    norm_ref = normalize_for_match(ref)
-    return any(c == norm_ref for c in _pred_candidates(pred, ref))
-
-
-def edit_similarity(pred: str, ref: str) -> float:
-    """Edit similarity in [0, 1]. 1 = identical."""
-    return SequenceMatcher(None, pred, ref).ratio()
-
-
-def code_bleu_score(pred: str, ref: str, lang: str = "python") -> float:
-    """Code BLEU if codebleu available, else 0."""
-    try:
-        from codebleu import calc_codebleu
-        result = calc_codebleu([ref], [pred], lang=lang)
-        return result["codebleu"]
-    except Exception:
-        return 0.0
-
-
-def get_bos_id(tok):
-    """Get BOS token id for generation (fallback: eos, then pad)."""
-    if tok.bos_token_id is not None:
-        return tok.bos_token_id
-    if tok.eos_token_id is not None:
-        return tok.eos_token_id
-    return tok.pad_token_id
-
-
-def load_split(splits_dir: Path, split_name: str, limit_repos: int | None = None) -> list:
-    """Load split JSON (e.g. cr_test.json). Returns list of {repo, prefix, target}."""
-    path = splits_dir / f"{split_name}.json"
-    if not path.exists():
-        return []
-    data = json.loads(path.read_text(encoding="utf-8"))
-    repos = data.get("repositories", {})
-    repo_names = sorted(repos.keys())
-    if limit_repos is not None and limit_repos > 0:
-        repo_names = repo_names[:limit_repos]
-    items = []
-    for repo in repo_names:
-        r = repos[repo]
-        pairs = r.get("qna_pairs", [])
-        for p in pairs:
-            prefix = p.get("prefix", "")
-            target = p.get("target", "")
-            if not prefix or not target:
-                continue
-            items.append({"repo": repo, "prefix": prefix, "target": target})
-    return items
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+from evaluation.data_utils import get_default_splits_dir, load_split, get_bos_id
+from evaluation.metrics import (
+    strip_fim_tokens, strip_comments, postprocess_prediction,
+    exact_match, edit_similarity, code_bleu_score,
+)
 
 
 def _prepare_input(prefix: str, tokenizer, bos_id: int, max_input_tokens: int) -> list:
@@ -158,22 +78,20 @@ def invoke_batch(model, tokenizer, prefixes: list[str], bos_id: int, max_input_t
 
 def main():
     ap = argparse.ArgumentParser(description="Evaluate pretrained Qwen2.5-Coder on split JSON")
-    default_dataset = os.path.join(
-        os.environ.get("SCRATCH", os.path.expanduser("~/scratch")),
-        "REPO_DATASET",
-    )
+    default_dataset = get_default_splits_dir()
     ap.add_argument("--checkpoint", type=str, default=None,
                     help="Checkpoint dir - results go to {dir}_results/{split}/ (ignored if --output is set)")
     ap.add_argument("--output", type=str, default=None,
                     help="Output JSON path (e.g. $SCRATCH/BASELINES/qwen_full.json)")
     ap.add_argument("--splits-dir", type=str, default=default_dataset,
                     help="Dir with cr_test.json, cr_val.json, etc.")
-    ap.add_argument("--split", type=str, default="cr_test_structured",
-                    help="Split to evaluate (default: cr_test_structured)")
+    ap.add_argument("--split", type=str, default="cr_test",
+                    help="Split to evaluate (default: cr_test)")
     ap.add_argument("--model-name", type=str, default="Qwen/Qwen2.5-Coder-1.5B")
     ap.add_argument("--max-new-tokens", type=int, default=128,
                     help="Max tokens to generate (default 128, use 64 for faster)")
-    ap.add_argument("--max-input-tokens", type=int, default=2048)
+    ap.add_argument("--max-input-tokens", type=int, default=16384,
+                    help="Max input tokens (default 16384 for fair comparison with RAG/oracle)")
     ap.add_argument("--batch-size", type=int, default=8,
                     help="Batch size for inference (default 8)")
     ap.add_argument("--limit", type=int, default=None,
@@ -249,12 +167,8 @@ def main():
 
         for it, pred in zip(batch_items, preds):
             target = it["target"]
-            pred = strip_fim_tokens(pred)
-            # Stop at newline if target is single-line (common for assertions)
-            if "\n" not in target and "\n" in pred:
-                pred = pred.split("\n")[0]
-
-            pred_clean = strip_comments(pred)
+            pred_raw = pred
+            pred_clean = postprocess_prediction(pred, target)
             target_clean = strip_comments(target)
 
             em = exact_match(pred_clean, target_clean)
@@ -268,6 +182,7 @@ def main():
                 "repo": it["repo"],
                 "expected": target_clean,
                 "got": pred_clean,
+                "got_raw": pred_raw,
                 "exact_match": em,
                 "code_bleu": bleu,
                 "edit_similarity": edit_sim,

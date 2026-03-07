@@ -90,7 +90,7 @@ def main():
     ap.add_argument("--splits-dir", type=str, default=default_dataset)
     ap.add_argument("--cache-dir", type=str, default=default_cache,
                     help="Dir with pre-built oracle contexts (from build_context.py)")
-    ap.add_argument("--split", type=str, default="cr_test_structured")
+    ap.add_argument("--split", type=str, default="cr_test")
     ap.add_argument("--model-name", type=str, default="Qwen/Qwen2.5-Coder-1.5B")
     ap.add_argument("--max-new-tokens", type=int, default=128)
     ap.add_argument("--max-input-tokens", type=int, default=16384,
@@ -205,33 +205,27 @@ def main():
             "had_oracle_context": bool(oracle_code),
         })
 
-    exact_match_pct = 100.0 * em_count / n
-    code_bleu_avg = bleu_sum / n
-    edit_sim_avg = edit_sum / n
-
-    results = {
-        "method": "oracle_context",
-        "split": args.split,
-        "exact_match_pct": exact_match_pct,
-        "exact_match_count": em_count,
-        "n": n,
-        "n_with_context": n_had_context,
-        "code_bleu": code_bleu_avg,
-        "edit_similarity": edit_sim_avg,
-        "config": {
-            "max_input_tokens": args.max_input_tokens,
-            "model_name": args.model_name,
-        },
-        "entries": entries,
-    }
-
-    if args.output:
-        results_path = Path(args.output).expanduser().resolve()
-    else:
-        scratch = os.environ.get("SCRATCH", os.path.expanduser("~/scratch"))
-        results_path = Path(scratch) / "BASELINES" / f"oracle_context_{args.split}.json"
-    results_path.parent.mkdir(parents=True, exist_ok=True)
-    results_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
+        if (i + 1) % 50 == 0 or (i + 1) == n:
+            n_eval = len(entries)
+            _res = {
+                "method": "oracle_context",
+                "split": args.split,
+                "exact_match_pct": 100.0 * em_count / n_eval,
+                "exact_match_count": em_count,
+                "n": n_eval, "n_total": n,
+                "n_with_context": n_had_context,
+                "code_bleu": bleu_sum / n_eval,
+                "edit_similarity": edit_sum / n_eval,
+                "config": {"max_input_tokens": args.max_input_tokens, "model_name": args.model_name},
+                "entries": entries,
+            }
+            if args.output:
+                results_path = Path(args.output).expanduser().resolve()
+            else:
+                scratch = os.environ.get("SCRATCH", os.path.expanduser("~/scratch"))
+                results_path = Path(scratch) / "BASELINES" / f"oracle_context_{args.split}.json"
+            results_path.parent.mkdir(parents=True, exist_ok=True)
+            results_path.write_text(json.dumps(_res, indent=2), encoding="utf-8")
 
     print("\n" + "=" * 60)
     print(f"Oracle Context Baseline on {args.split}")

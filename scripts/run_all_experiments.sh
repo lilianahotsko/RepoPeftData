@@ -49,27 +49,27 @@ if [ "$STAGE" = "all" ] || [ "$STAGE" = "baselines" ]; then
     # 2a. Pretrained (on both CR and IR)
     echo "--- Pretrained baseline ---"
     python baselines/pretrained/test_qwen_coder.py \
-        --splits-dir "$SPLITS_DIR" --split cr_test_structured \
-        --output "$SCRATCH/BASELINES/pretrained_cr_test_structured.json"
+        --splits-dir "$SPLITS_DIR" --split cr_test \
+        --output "$SCRATCH/BASELINES/pretrained_cr_test.json"
     python baselines/pretrained/test_qwen_coder.py \
-        --splits-dir "$SPLITS_DIR" --split ir_test_structured \
-        --output "$SCRATCH/BASELINES/pretrained_ir_test_structured.json"
+        --splits-dir "$SPLITS_DIR" --split ir_test \
+        --output "$SCRATCH/BASELINES/pretrained_ir_test.json"
 
     # 2b. RAG baseline
     echo "--- RAG baseline ---"
     for k in 3 5 10; do
         python baselines/rag/test_rag.py \
             --splits-dir "$SPLITS_DIR" --repos-root "$REPOS_ROOT" \
-            --split cr_test_structured --top-k $k \
-            --output "$SCRATCH/BASELINES/rag_top${k}_cr_test_structured.json"
+            --split cr_test --top-k $k \
+            --output "$SCRATCH/BASELINES/rag_top${k}_cr_test.json"
     done
 
     # 2c. ICL baseline
     echo "--- ICL baseline ---"
     for shots in 3 5; do
         python baselines/icl/test_icl.py \
-            --splits-dir "$SPLITS_DIR" --split cr_test_structured --n-shots $shots \
-            --output "$SCRATCH/BASELINES/icl_${shots}shot_cr_test_structured.json"
+            --splits-dir "$SPLITS_DIR" --split cr_test --n-shots $shots \
+            --output "$SCRATCH/BASELINES/icl_${shots}shot_cr_test.json"
     done
 
     # 2d. Fine-tuned baseline
@@ -78,8 +78,8 @@ if [ "$STAGE" = "all" ] || [ "$STAGE" = "baselines" ]; then
         --splits-dir "$SPLITS_DIR" --no-wandb
     python baselines/finetuned/test_finetuned.py \
         --model-path "$SCRATCH/TRAINING_CHECKPOINTS/FINETUNED/final" \
-        --splits-dir "$SPLITS_DIR" --split cr_test_structured \
-        --output "$SCRATCH/BASELINES/finetuned_cr_test_structured.json"
+        --splits-dir "$SPLITS_DIR" --split cr_test \
+        --output "$SCRATCH/BASELINES/finetuned_cr_test.json"
 
     # 2e. Single LoRA baseline
     echo "--- Single LoRA baseline ---"
@@ -87,8 +87,8 @@ if [ "$STAGE" = "all" ] || [ "$STAGE" = "baselines" ]; then
         --splits-dir "$SPLITS_DIR" --no-wandb
     python baselines/single_lora/test_single_lora.py \
         --adapter "$SCRATCH/TRAINING_CHECKPOINTS/SINGLE_LORA/adapter" \
-        --splits-dir "$SPLITS_DIR" --split cr_test_structured \
-        --output "$SCRATCH/BASELINES/single_lora_cr_test_structured.json"
+        --splits-dir "$SPLITS_DIR" --split cr_test \
+        --output "$SCRATCH/BASELINES/single_lora_cr_test.json"
 
     # 2f. Per-repo LoRA (sample of repos)
     echo "--- Per-repo LoRA baseline ---"
@@ -107,7 +107,7 @@ if [ "$STAGE" = "all" ] || [ "$STAGE" = "hypernet" ]; then
     python hypernetwork/hypernetwork_sampled_test.py \
         --checkpoint "$SCRATCH/TRAINING_CHECKPOINTS/HYPERNET/full_repos" \
         --splits-dir "$SPLITS_DIR" \
-        --splits cr_test_structured ir_test_structured
+        --splits cr_test ir_test
 fi
 
 # ---- Step 4: Composable hypernetwork ----
@@ -126,7 +126,7 @@ if [ "$STAGE" = "all" ] || [ "$STAGE" = "composable" ]; then
     echo "--- Incremental adaptation ---"
     python hypernetwork/eval_incremental.py \
         --checkpoint "$SCRATCH/TRAINING_CHECKPOINTS/HYPERNET_COMPOSABLE_weighted" \
-        --splits-dir "$SPLITS_DIR" --split cr_test_structured --limit-repos 20
+        --splits-dir "$SPLITS_DIR" --split cr_test --limit-repos 20
 fi
 
 # ---- Step 5: Scale experiments ----

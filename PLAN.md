@@ -9,10 +9,11 @@
 | Repo-level embeddings | Done | `$SCRATCH/REPO_DATASET/repositories/*/REPO_METADATA.json` |
 | Hypernetwork (1.5B, r=16) | Trained | `$SCRATCH/TRAINING_CHECKPOINTS/HYPERNET/full_repos/` |
 | Hypernetwork eval (cr_test) | Done | 58.02% EM, 0.7921 EditSim |
-| Pretrained baseline (cr_test) | Done | 34.63% EM, 0.5302 EditSim |
+| Pretrained baseline (cr_test) | Done | 45.6% EM, 0.596 EditSim |
 | File-level embeddings | **NOT DONE** | Code ready, repos need re-embedding |
-| RAG baseline | **NOT DONE** | Code at `baselines/rag/test_rag.py` |
-| ICL baseline | **NOT DONE** | Code at `baselines/icl/test_icl.py` |
+| RAG baseline | **NOT DONE** | Code at `baselines/rag/test_rag.py` (no results in BASELINES) |
+| ICL baseline | Done | 41.0% EM (5-shot cr_test), 44.9% (ir_test) |
+| Oracle context | Done | 46.2% EM (cr_test), 47.7% (ir_test) |
 | Fine-tuned baseline | **NOT DONE** | Code at `baselines/finetuned/` |
 | Single LoRA baseline | **NOT DONE** | Code at `baselines/single_lora/` |
 | Per-repo LoRA (IR) | **NOT DONE** | Code at `baselines/lora_per_repo/` |
@@ -47,8 +48,12 @@ sbatch scripts/slurm/phase1_embed.sh
 
 Pretrained, RAG (k=3,5,10), ICL (3,5-shot) -- no training needed.
 
+**Fair setup (implemented):** All use `max_input_tokens=16384`, shared `load_split` (comma filter), ICL uses retrieval-based example selection for CR.
+
 ```bash
 sbatch scripts/slurm/phase2_inference_baselines.sh
+# Or run individual scripts: phase2a_pretrained.sh, phase2b_rag.sh, phase2c_icl.sh, phase2d_oracle.sh
+# IR splits: phase2b_rag_ir.sh, phase2c_icl_ir.sh, phase2d_oracle_ir.sh
 ```
 
 **Output**: `$SCRATCH/BASELINES/pretrained_*.json`, `rag_*.json`, `icl_*.json`
@@ -135,16 +140,63 @@ sbatch scripts/slurm/phase10_analysis.sh
 
 ## Expected Results Table
 
-| Method | CR Test EM | CR Test EditSim | IR Test EM | Notes |
-|--------|-----------|-----------------|-----------|-------|
-| Pretrained | 34.6% | 0.530 | TBD | Done |
-| RAG (k=5) | TBD | TBD | -- | Phase 2 |
-| ICL (5-shot) | TBD | TBD | -- | Phase 2 |
-| Fine-tuned | TBD | TBD | TBD | Phase 3 |
-| Single LoRA | TBD | TBD | TBD | Phase 3 |
-| LoRA per repo | N/A | N/A | TBD | Phase 4 |
-| Code2LoRA | 58.0% | 0.792 | TBD | Done + Phase 5 |
-| Code2LoRA + Compose | TBD | TBD | TBD | Phase 6-7 |
+**Note:** After fair baseline setup (unified data loading, max_input_tokens=16384, ICL retrieval), re-run Phase 2 and update this table.
+
+| Method | CR Test EM | CR Test EditSim | IR Test EM | IR Test EditSim | Notes |
+|--------|-----------|-----------------|-----------|-----------------|-------|
+| Pretrained | 45.6% | 0.596 | 46.8% | 0.615 | Done (pre-fair; re-run for updated) |
+| RAG (k=5) | TBD | TBD | TBD | TBD | Phase 2 (no results yet) |
+| ICL (3-shot) | 41.7% | 0.555 | 45.3% | 0.593 | Done (pre-fair; re-run with retrieval) |
+| ICL (5-shot) | 41.0% | 0.547 | 44.9% | 0.587 | Done (pre-fair; re-run with retrieval) |
+| Oracle context | 46.2% | 0.601 | 47.7% | 0.618 | Done |
+| Fine-tuned | TBD | TBD | TBD | TBD | Phase 3 |
+| Single LoRA | TBD | TBD | TBD | TBD | Phase 3 |
+| LoRA per repo | N/A | N/A | TBD | TBD | Phase 4 |
+| Code2LoRA | 58.0% | 0.792 | TBD | TBD | Done + Phase 5 |
+| Code2LoRA + Compose | TBD | TBD | TBD | TBD | Phase 6-7 |
+
+## Baseline Analysis: ICL vs Pretrained (Top-Tier Fairness)
+
+### Is it normal that ICL underperforms pretrained?
+
+**No — this is atypical.** At top venues (EMNLP, ACL, NeurIPS), reviewers expect:
+- ICL ≥ pretrained (few-shot should help)
+- 5-shot ≥ 3-shot (more examples should help or at least not hurt)
+
+Your results show the opposite: Pretrained (45.6% EM) > ICL 3-shot (41.7%) > ICL 5-shot (41.0%). This will raise red flags unless explained.
+
+### Likely causes (implementation / setup)
+
+1. **Context budget mismatch**
+   - Pretrained: `max_input_tokens=2048` (prefix only)
+   - ICL: `max_input_tokens=4096` (examples + prefix)
+   - Truncation keeps the *last* N tokens. With 5 examples (~2–3K tokens) + prefix, truncation often drops the start of the prompt → partial or missing examples, which can confuse the model.
+
+2. **Example selection**
+   - CR: Examples from *nearest training repo* by repo-level embedding. Repo similarity ≠ assertion-style similarity; examples can be misleading.
+   - IR: Random sample from same-repo train pairs. Random sampling can pick weak or noisy examples.
+
+3. **Prompt format**
+   - ICL uses meta-instructions: `# Examples of assertion completions:` and `# Now complete the following assertion:`. These may distract or mislead the model.
+
+4. **More shots → more truncation**
+   - 5-shot uses more tokens than 3-shot. With fixed 4096, 5-shot is more likely to truncate and lose useful context, which can explain 3-shot > 5-shot.
+
+### Recommendations for a fair, defensible comparison
+
+| Action | Purpose |
+|--------|---------|
+| **Align `max_input_tokens`** | Use 8192 or 16384 for pretrained, ICL, RAG, oracle so all methods see the same context budget. |
+| **Retrieval-based ICL** | For CR, retrieve examples by *prefix* similarity (e.g., embedding of prefix), not just nearest repo. |
+| **Example quality** | For IR, try similarity-based selection instead of random sampling. |
+| **Ablation on format** | Test simpler prompts (no meta-instructions) to see if format hurts. |
+| **Document in paper** | Add a short discussion: “ICL underperformed pretrained; we hypothesize X, Y, Z” and cite the above factors. |
+
+### Verdict for top-tier submission
+
+- **Current state:** Results are likely to be questioned. “Pretrained beats ICL” without explanation will look like a weak or unfair baseline.
+- **After fixes (implemented):** Fair setup applied: unified data loading (comma filter), max_input_tokens=16384 for all, ICL retrieval-based example selection for CR. Re-run Phase 2 baselines and update the results table. Code2LoRA’s gain over pretrained (58% vs 45.6%) remains strong; the main risk is baseline credibility.
+- **Oracle context** (46.2% EM) is only slightly above pretrained (45.6%), which is plausible: oracle adds relevant code but not the exact answer. That is acceptable.
 
 ## Estimated Total GPU Time
 

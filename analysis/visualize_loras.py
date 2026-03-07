@@ -32,7 +32,7 @@ def main():
     )
     ap.add_argument("--checkpoint", type=str, required=True)
     ap.add_argument("--splits-dir", type=str, default=default_dataset)
-    ap.add_argument("--split", type=str, default="cr_test_structured")
+    ap.add_argument("--split", type=str, default="cr_test")
     ap.add_argument("--output-dir", type=str, default="analysis/figures")
     ap.add_argument("--limit-repos", type=int, default=50)
     ap.add_argument("--device", type=str, default="cuda")

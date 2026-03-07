@@ -14,14 +14,16 @@ mkdir -p slurm_logs
 echo "===== Pretrained baseline ====="
 echo "Start: $(date)"
 
-echo "--- Pretrained (cr_test_structured) ---"
+echo "--- Pretrained (cr_test) ---"
 python baselines/pretrained/test_qwen_coder.py \
-    --splits-dir "$SPLITS_DIR" --split cr_test_structured \
-    --output "$BASELINES_DIR/pretrained_cr_test_structured.json"
+    --splits-dir "$SPLITS_DIR" --split cr_test \
+    --max-input-tokens 16384 \
+    --output "$BASELINES_DIR/pretrained_cr_test.json"
 
-echo "--- Pretrained (ir_test_structured) ---"
+echo "--- Pretrained (ir_test) ---"
 python baselines/pretrained/test_qwen_coder.py \
-    --splits-dir "$SPLITS_DIR" --split ir_test_structured \
-    --output "$BASELINES_DIR/pretrained_ir_test_structured.json"
+    --splits-dir "$SPLITS_DIR" --split ir_test \
+    --max-input-tokens 16384 \
+    --output "$BASELINES_DIR/pretrained_ir_test.json"
 
 echo "Done: $(date)"

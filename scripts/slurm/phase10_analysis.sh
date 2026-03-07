@@ -19,7 +19,7 @@ echo "Start: $(date)"
 python analysis/analyze_results.py \
     --results-dir "$BASELINES_DIR" \
     --output-dir analysis/output \
-    --hypernet-results "$CKPT_DIR/HYPERNET/full_repos_results/cr_test_structured/results.json"
+    --hypernet-results "$CKPT_DIR/HYPERNET/full_repos_results/cr_test/results.json"
 
 python analysis/visualize_loras.py \
     --checkpoint "$CKPT_DIR/HYPERNET/full_repos" \
@@ -29,7 +29,7 @@ python analysis/visualize_loras.py \
 
 echo ""
 echo "===== Summary of all results ====="
-for f in "$BASELINES_DIR"/*_structured.json; do
+for f in "$BASELINES_DIR"/*.json; do
     if [ -f "$f" ]; then
         name=$(basename "$f" .json)
         em=$(python -c "import json; d=json.load(open('$f')); print(f\"{d.get('exact_match_pct',0):.2f}%\")" 2>/dev/null || echo "N/A")

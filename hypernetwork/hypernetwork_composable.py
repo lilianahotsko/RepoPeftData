@@ -386,8 +386,8 @@ def main():
                 })
         return items
 
-    train_items = load_split_with_files(splits_dir / "train_structured.json", args.limit_train_repos)
-    eval_items = load_split_with_files(splits_dir / "cr_val_structured.json", args.limit_eval_repos)
+    train_items = load_split_with_files(splits_dir / "train.json", args.limit_train_repos)
+    eval_items = load_split_with_files(splits_dir / "cr_val.json", args.limit_eval_repos)
 
     print(f"Loaded: train={len(train_items)} eval={len(eval_items)}")
 

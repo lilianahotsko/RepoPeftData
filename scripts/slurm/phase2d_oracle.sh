@@ -20,12 +20,12 @@ python baselines/oracle_context/build_context.py \
     --splits-dir "$SPLITS_DIR" \
     --cache-dir "$SCRATCH/ORACLE_CONTEXT_CACHE"
 
-echo "--- Oracle Context: Eval (cr_test_structured) ---"
+echo "--- Oracle Context: Eval (cr_test) ---"
 python baselines/oracle_context/test_oracle_context.py \
     --splits-dir "$SPLITS_DIR" \
     --cache-dir "$SCRATCH/ORACLE_CONTEXT_CACHE" \
-    --split cr_test_structured \
+    --split cr_test \
     --max-input-tokens 16384 \
-    --output "$BASELINES_DIR/oracle_context_cr_test_structured.json"
+    --output "$BASELINES_DIR/oracle_context_cr_test.json"
 
 echo "Done: $(date)"
