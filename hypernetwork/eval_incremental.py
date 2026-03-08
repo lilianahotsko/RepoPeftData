@@ -37,8 +37,8 @@ def main():
     ap.add_argument("--splits-dir", type=str, default=default_dataset)
     ap.add_argument("--split", type=str, default="cr_test")
     ap.add_argument("--model-name", type=str, default="Qwen/Qwen2.5-Coder-1.5B")
-    ap.add_argument("--max-new-tokens", type=int, default=256)
-    ap.add_argument("--max-input-tokens", type=int, default=2048)
+    ap.add_argument("--max-new-tokens", type=int, default=128)
+    ap.add_argument("--max-input-tokens", type=int, default=16384)
     ap.add_argument("--max-files-to-test", type=int, default=20,
                     help="Max number of files to incrementally add")
     ap.add_argument("--limit", type=int, default=None)

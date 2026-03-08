@@ -47,8 +47,11 @@ def load_split(splits_dir: Path, split_name: str, limit_repos: int | None = None
         for p in r.get("qna_pairs", []):
             prefix = p.get("prefix", "")
             target = p.get("target", "")
-            if prefix and target:
-                items.append({"repo": repo, "prefix": prefix, "target": target})
+            if not prefix or not target:
+                continue
+            if target.lstrip().startswith(","):
+                continue
+            items.append({"repo": repo, "prefix": prefix, "target": target})
     return items
 
 
@@ -119,7 +122,7 @@ def main():
                     help="Split to evaluate: ir_test for final testing, ir_val for validation (default: ir_test)")
     ap.add_argument("--model-name", type=str, default="Qwen/Qwen2.5-Coder-1.5B")
     ap.add_argument("--max-new-tokens", type=int, default=128)
-    ap.add_argument("--max-input-tokens", type=int, default=2048)
+    ap.add_argument("--max-input-tokens", type=int, default=16384)
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--limit-repos", type=int, default=1,
@@ -210,6 +213,7 @@ def main():
 
         for it, pred in zip(batch_items, preds):
             target = it["target"]
+            pred_raw = pred
             pred_clean = postprocess_prediction(pred, target)
             target_clean = strip_comments(target)
 
@@ -224,6 +228,7 @@ def main():
                 "repo": it["repo"],
                 "expected": target_clean,
                 "got": pred_clean,
+                "got_raw": pred_raw,
                 "exact_match": em,
                 "code_bleu": bleu,
                 "edit_similarity": edit_sim,

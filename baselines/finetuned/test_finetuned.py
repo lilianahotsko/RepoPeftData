@@ -67,7 +67,7 @@ def main():
     ap.add_argument("--splits-dir", type=str, default=default_dataset)
     ap.add_argument("--split", type=str, default="cr_test")
     ap.add_argument("--max-new-tokens", type=int, default=128)
-    ap.add_argument("--max-input-tokens", type=int, default=2048)
+    ap.add_argument("--max-input-tokens", type=int, default=16384)
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--limit-repos", type=int, default=None)
@@ -121,6 +121,7 @@ def main():
 
         for it, pred in zip(batch_items, preds):
             target = it["target"]
+            pred_raw = pred
             pred_clean = postprocess_prediction(pred, target)
             target_clean = strip_comments(target)
 
@@ -133,6 +134,7 @@ def main():
 
             entries.append({
                 "repo": it["repo"], "expected": target_clean, "got": pred_clean,
+                "got_raw": pred_raw,
                 "exact_match": em, "code_bleu": bleu, "edit_similarity": edit_sim,
             })
 
@@ -153,6 +155,10 @@ def main():
             results_path = Path(scratch) / "BASELINES" / f"finetuned_{args.split}.json"
         results_path.parent.mkdir(parents=True, exist_ok=True)
         results_path.write_text(json.dumps(_res, indent=2), encoding="utf-8")
+
+    exact_match_pct = 100.0 * em_count / n if n else 0
+    code_bleu_avg = bleu_sum / n if n else 0
+    edit_sim_avg = edit_sum / n if n else 0
 
     print("\n" + "=" * 60)
     print(f"Fine-tuned Baseline on {args.split}")

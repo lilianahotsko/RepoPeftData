@@ -106,6 +106,8 @@ if "--check-embeddings" in sys.argv:
     print()
     sys.exit(0)
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 # --- Heavy imports (torch, trl, transformers) ---
 import random
 from dataclasses import dataclass
@@ -178,13 +180,18 @@ def load_from_splits(
     limit_train_repos: Optional[int],
     limit_eval_repos: Optional[int],
     limit_test_repos: Optional[int],
+    oracle_cache_dir: Optional[Path] = None,
 ) -> Tuple[List[Dict], List[Dict], List[Dict]]:
     """
     Load from create_splits output: train.json, cr_val.json, cr_test.json.
     Each has repositories: {repo: {qna_pairs, embedding}}.
     limit_*_repos: take first N repos from each split (None = all).
+    If *oracle_cache_dir* is given, prepend oracle context to each prefix.
     Returns (train_items, eval_items, test_items) as flat lists of {repo, prefix, target, repo_embedding}.
     """
+    if oracle_cache_dir:
+        from evaluation.oracle_utils import load_oracle_cache, lookup_oracle_context, augment_prefix_with_oracle
+
     def load_split(path: Path, limit: Optional[int]) -> List[Dict]:
         if not path.exists():
             return []
@@ -194,17 +201,26 @@ def load_from_splits(
         if limit is not None:
             repo_names = repo_names[:limit]
         items = []
+        n_augmented = 0
         for repo in repo_names:
             r = repos[repo]
             pairs = r.get("qna_pairs", [])
             emb = r.get("embedding")
             if emb is None:
                 continue
+            oracle_contexts = load_oracle_cache(oracle_cache_dir, repo) if oracle_cache_dir else {}
             for p in pairs:
                 prefix = p.get("prefix", "")
                 target = p.get("target", "")
                 if not prefix or not target:
                     continue
+                if target.lstrip().startswith(","):
+                    continue
+                if oracle_contexts:
+                    oracle_code = lookup_oracle_context(oracle_contexts, p.get("metadata", {}))
+                    if oracle_code:
+                        prefix = augment_prefix_with_oracle(prefix, oracle_code)
+                        n_augmented += 1
                 items.append({
                     "repo": repo,
                     "repo_name": repo,
@@ -212,6 +228,8 @@ def load_from_splits(
                     "target": target,
                     "repo_embedding": emb,
                 })
+        if oracle_cache_dir and items:
+            print(f"  Oracle: augmented {n_augmented}/{len(items)} ({100*n_augmented/len(items):.1f}%) in {path.name}")
         return items
 
     train_items = load_split(splits_dir / "train.json", limit_train_repos)
@@ -872,6 +890,10 @@ def main():
     ap.add_argument("--alpha", type=int, default=32)
 
     ap.add_argument("--max-seq-len", type=int, default=8192)
+    ap.add_argument("--use-oracle", action="store_true",
+                    help="Prepend oracle context to prefixes")
+    ap.add_argument("--oracle-cache-dir", type=str, default=None,
+                    help="Dir with pre-built oracle contexts")
 
     ap.add_argument("--hidden-dim", type=int, default=512)
 
@@ -913,11 +935,20 @@ def main():
 
     set_seed(args.seed)
 
+    oracle_cache_dir = None
+    if args.use_oracle:
+        from evaluation.oracle_utils import get_default_oracle_cache_dir
+        oracle_cache_dir = Path(args.oracle_cache_dir or get_default_oracle_cache_dir()).expanduser().resolve()
+        if not oracle_cache_dir.exists():
+            raise FileNotFoundError(f"Oracle cache not found: {oracle_cache_dir}")
+        print(f"Using oracle context from {oracle_cache_dir}")
+
     train_items, eval_items, test_items = load_from_splits(
         splits_dir=splits_dir,
         limit_train_repos=args.limit_train_repos,
         limit_eval_repos=args.limit_eval_repos,
         limit_test_repos=args.limit_test_repos,
+        oracle_cache_dir=oracle_cache_dir,
     )
 
     print("=" * 80)
@@ -1038,6 +1069,8 @@ def main():
         save_strategy="steps",
         save_steps=args.save_steps,
         save_total_limit=args.save_total_limit,
+        load_best_model_at_end=True,
+        metric_for_best_model="eval_loss",
         save_safetensors=True,
         seed=args.seed,
         bf16=True,

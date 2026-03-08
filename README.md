@@ -168,3 +168,54 @@ remove the tests which start with the ,
     self.assertLogs: 1 (0.0%)
 [lhotsko@g23.nibi RepoPeftData]$ 
 
+
+
+
+Total pairs (after comma filter): 39612
+Skipped (comma-leading): 0
+Pairs with oracle context: 34723/39612 (87.7%)
+
+=== PREFIX ONLY (tokens) ===
+  min=10  max=19281  mean=357  median=221
+  >  512:  6594 (16.6%)
+  > 1024:  1922 (4.9%)
+  > 2048:   558 (1.4%)
+  > 4096:   140 (0.4%)
+  > 8192:    28 (0.1%)
+  >16384:     2 (0.0%)
+
+=== PREFIX + ORACLE CONTEXT (tokens) ===
+  min=10  max=576153  mean=2975  median=1160
+  >  512: 28979 (73.2%)
+  > 1024: 21187 (53.5%)
+  > 2048: 12962 (32.7%)
+  > 4096:  6632 (16.7%)
+  > 8192:  2615 (6.6%)
+  >16384:   821 (2.1%)
+
+=== ORACLE CONTEXT ONLY (tokens, when present) ===
+  min=12  max=574933  mean=2985  median=1074
+  >  256: 28691 (82.6%)
+  >  512: 23441 (67.5%)
+  > 1024: 17758 (51.1%)
+  > 2048: 11054 (31.8%)
+  > 4096:  5764 (16.6%)
+  > 8192:  2332 (6.7%)
+
+=== TARGET (tokens) ===
+  min=1  max=249  mean=5  median=3
+  >   16:  1557 (3.9%)
+  >   32:   628 (1.6%)
+  >   64:   192 (0.5%)
+  >  128:    39 (0.1%)
+  >  256:     0 (0.0%)
+
+=== FULL TRAINING SEQUENCE: prefix+oracle+target (tokens) ===
+  min=12  max=576160  mean=2980  median=1164
+  >  512: 29062 (73.4%)
+  > 1024: 21231 (53.6%)
+  > 2048: 12981 (32.8%)
+  > 4096:  6643 (16.8%)
+  > 8192:  2618 (6.6%)
+  >16384:   822 (2.1%)
+  >32768:   251 (0.6%)

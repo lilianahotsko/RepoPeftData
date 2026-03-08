@@ -34,6 +34,12 @@ def main():
     ap.add_argument("--eval-only", action="store_true", help="Skip training, only evaluate")
     ap.add_argument("--eval-split", type=str, default="ir_test")
     ap.add_argument("--epochs", type=int, default=3)
+    ap.add_argument("--max-seq-length", type=int, default=None,
+                    help="Pass through to train_lora.py")
+    ap.add_argument("--use-oracle", action="store_true",
+                    help="Pass through to train_lora.py")
+    ap.add_argument("--oracle-cache-dir", type=str, default=None,
+                    help="Pass through to train_lora.py")
     ap.add_argument("--no-wandb", action="store_true")
     args = ap.parse_args()
 
@@ -73,14 +79,18 @@ def main():
                     sys.executable, train_script,
                     "--from-split", "train",
                     "--splits-dir", str(splits_dir),
-                    "--limit-repos", "1",
+                    "--repo-name", repo,
                     "--epochs", str(args.epochs),
                     "--output-dir", str(Path(args.output_base) / repo),
                 ]
                 if args.no_wandb:
                     cmd.append("--no-wandb")
-
-                # Need to filter to specific repo
+                if args.use_oracle:
+                    cmd.append("--use-oracle")
+                if args.oracle_cache_dir:
+                    cmd.extend(["--oracle-cache-dir", args.oracle_cache_dir])
+                if args.max_seq_length:
+                    cmd.extend(["--max-seq-length", str(args.max_seq_length)])
                 print(f"  Training LoRA for {repo}...")
                 result = subprocess.run(cmd, capture_output=True, text=True)
                 if result.returncode != 0:
@@ -106,13 +116,13 @@ def main():
             print(f"  EVAL FAILED: {result.stderr[-500:]}")
             continue
 
-        # Read results
-        results_path = adapter_path.parent / "adapter_results" / args.eval_split / "lora_results.json"
+        # Read results -- test_lora.py saves to {adapter_parent}_results/{split}/
+        repo_dir = adapter_path.parent
+        results_path = Path(str(repo_dir) + "_results") / args.eval_split / "lora_results.json"
         if not results_path.exists():
-            # Try alternative paths
             for rp in [
+                repo_dir / "adapter_results" / args.eval_split / "lora_results.json",
                 Path(str(adapter_path) + "_results") / args.eval_split / "lora_results.json",
-                adapter_path.parent / f"{args.eval_split}_results" / "lora_results.json",
             ]:
                 if rp.exists():
                     results_path = rp
@@ -124,12 +134,17 @@ def main():
             n = repo_results.get("n", 0)
             em_count = repo_results.get("exact_match_count", 0)
             edit_sim = repo_results.get("edit_similarity", 0)
-            print(f"  EM: {em_pct:.2f}% ({em_count}/{n})  EditSim: {edit_sim:.4f}")
+            bleu = repo_results.get("code_bleu", 0)
+            print(f"  EM: {em_pct:.2f}% ({em_count}/{n})  EditSim: {edit_sim:.4f}  BLEU: {bleu:.4f}")
             all_results[repo] = repo_results
             total_em += em_count
             total_n += n
         else:
-            print(f"  Results not found")
+            print(f"  Results not found at {results_path}")
+            if result.stderr:
+                print(f"  Eval stderr (last 300): {result.stderr[-300:]}")
+            if result.stdout:
+                print(f"  Eval stdout (last 300): {result.stdout[-300:]}")
 
     # Aggregate
     print("\n" + "=" * 60)

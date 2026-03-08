@@ -99,28 +99,106 @@ def _parse_imports_fallback(source: str) -> list[dict]:
 # Step B: Resolve module paths to repo files
 # --------------------------------------------------------------------------
 
+_SOURCE_ROOTS = {"src", "lib", "app", "python", "py"}
+
+
+def _find_source_roots(repo_dir: Path) -> list[Path]:
+    """
+    Detect source root directories inside a repo.
+
+    Returns a list of directories that should be treated as additional
+    import roots beyond the repo root itself.  Handles:
+      - Well-known names: src/, lib/, app/, python/, py/
+      - Any top-level directory that contains a Python package
+        (i.e. has a subdirectory with __init__.py) but is NOT itself
+        a package (no __init__.py of its own).  This catches monorepo
+        layouts like  packages/mylib/__init__.py.
+    """
+    roots: list[Path] = []
+
+    for child in repo_dir.iterdir():
+        if not child.is_dir() or child.name in SKIP_DIRS or child.name == "TEST_HYPERNET":
+            continue
+
+        if child.name in _SOURCE_ROOTS:
+            roots.append(child)
+            continue
+
+        # Skip if this directory is already a Python package itself
+        if (child / "__init__.py").exists():
+            continue
+
+        # Monorepo heuristic: directory contains at least one Python
+        # sub-package (child_dir/sub/__init__.py) and is not a known
+        # non-source directory.
+        for grandchild in child.iterdir():
+            if grandchild.is_dir() and (grandchild / "__init__.py").exists():
+                roots.append(child)
+                break
+
+    return roots
+
+
 def _build_repo_file_index(repo_dir: Path) -> dict[str, Path]:
     """
     Build a map of dotted module paths to file paths.
     e.g. "mypackage.utils" -> repo_dir / "mypackage" / "utils.py"
+
+    Files are indexed relative to the repo root AND relative to each
+    detected source root (src/, lib/, monorepo dirs, ...).  The source-root
+    entries take precedence when there is a collision so that
+    ``from mypackage import X`` resolves even when mypackage lives
+    under ``src/mypackage/``.
     """
-    index = {}
+    index: dict[str, Path] = {}
+
+    # Collect all Python files once
+    all_py_files: list[Path] = []
     for root, dirs, files in os.walk(repo_dir):
         dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
         for fn in files:
-            if not fn.endswith(".py"):
+            if fn.endswith(".py"):
+                all_py_files.append(Path(root) / fn)
+
+    # Index relative to repo root (baseline)
+    for fp in all_py_files:
+        dotted = _path_to_dotted(fp, repo_dir)
+        if dotted:
+            index[dotted] = fp
+
+    # Index relative to each source root (higher priority)
+    source_roots = _find_source_roots(repo_dir)
+    for src_root in source_roots:
+        for fp in all_py_files:
+            try:
+                fp.relative_to(src_root)
+            except ValueError:
                 continue
-            fp = Path(root) / fn
-            rel = fp.relative_to(repo_dir)
-            parts = list(rel.parts)
-            # mypackage/utils.py -> "mypackage.utils"
-            if parts[-1] == "__init__.py":
-                dotted = ".".join(parts[:-1])
-            else:
-                dotted = ".".join(parts)[:-3]  # strip .py
+            dotted = _path_to_dotted(fp, src_root)
             if dotted:
-                index[dotted] = fp
+                index[dotted] = fp  # overwrites repo-root entry on collision
+
     return index
+
+
+def _path_to_dotted(filepath: Path, base: Path) -> str:
+    """Convert a .py file path to a dotted module name relative to *base*."""
+    rel = filepath.relative_to(base)
+    parts = list(rel.parts)
+    if parts[-1] == "__init__.py":
+        dotted = ".".join(parts[:-1])
+    else:
+        dotted = ".".join(parts)[:-3]  # strip .py
+    return dotted
+
+
+def _module_exists_in_repo(top_level: str, repo_dir: Path, source_roots: list[Path]) -> bool:
+    """Check whether *top_level* corresponds to a directory or .py file
+    in the repo root or any detected source root."""
+    for base in [repo_dir] + source_roots:
+        if (base / top_level).exists() or (base / f"{top_level}.py").exists():
+            return True
+    return False
 
 
 def resolve_import_to_files(
@@ -128,6 +206,7 @@ def resolve_import_to_files(
     repo_dir: Path,
     file_index: dict[str, Path],
     test_file_rel: str,
+    source_roots: list[Path] | None = None,
 ) -> list[tuple[Path, list[str]]]:
     """
     Resolve one import dict to list of (file_path, [names_to_extract]).
@@ -159,15 +238,16 @@ def resolve_import_to_files(
 
     # Check if top-level module exists in repo (skip stdlib / third-party)
     top_level = full_module.split(".")[0]
-    top_as_dir = repo_dir / top_level
-    top_as_file = repo_dir / f"{top_level}.py"
-    if not top_as_dir.exists() and not top_as_file.exists():
+    if not _module_exists_in_repo(top_level, repo_dir, source_roots or []):
         # Also check conftest.py specially
         if top_level == "conftest":
             conftest = _find_conftest(repo_dir, test_file_rel)
             if conftest:
                 return [(conftest, names)]
-        return []
+        # Last resort: the module might still be in file_index if it was
+        # indexed from a source root (e.g. src/mypackage -> "mypackage").
+        if full_module not in file_index:
+            return []
 
     if imp["type"] == "from":
         # from mypackage.utils import foo, bar
@@ -364,6 +444,7 @@ def build_context_for_pair(
     repo_dir: Path,
     file_index: dict[str, Path],
     test_file_cache: dict[str, str],
+    source_roots: list[Path] | None = None,
 ) -> dict:
     """Build oracle context for a single QnA pair."""
     test_file_rel = metadata.get("file", "")
@@ -397,7 +478,10 @@ def build_context_for_pair(
     seen_files = set()
 
     for imp in imports:
-        file_matches = resolve_import_to_files(imp, repo_dir, file_index, test_file_rel)
+        file_matches = resolve_import_to_files(
+            imp, repo_dir, file_index, test_file_rel,
+            source_roots=source_roots,
+        )
         for fpath, imp_names in file_matches:
             if fpath in seen_files:
                 continue
@@ -495,6 +579,7 @@ def main():
             continue
 
         file_index = _build_repo_file_index(repo_dir)
+        source_roots = _find_source_roots(repo_dir)
         test_file_cache: dict[str, str] = {}
 
         contexts = {}
@@ -504,6 +589,7 @@ def main():
         for pair in pairs:
             ctx = build_context_for_pair(
                 pair["prefix"], pair["metadata"], repo_dir, file_index, test_file_cache,
+                source_roots=source_roots,
             )
             contexts[pair["key"]] = ctx
             stats["total_pairs"] += 1

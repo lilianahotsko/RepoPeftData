@@ -38,7 +38,7 @@ def main():
     ap.add_argument("--splits-dir", type=str, default=default_dataset,
                     help="Dir with cr_test.json, cr_val.json, etc.")
     ap.add_argument("--model-name", type=str, default="Qwen/Qwen2.5-Coder-1.5B")
-    ap.add_argument("--max-new-tokens", type=int, default=256)
+    ap.add_argument("--max-new-tokens", type=int, default=128)
     ap.add_argument("--max-input-tokens", type=int, default=16384,
                     help="Max input tokens (default 16384 for parity with baselines)")
     ap.add_argument("--limit", type=int, default=None,
@@ -189,6 +189,7 @@ def main():
                 )
             gen_ids = out[0][len(input_ids) :].tolist()
             pred = tok.decode(gen_ids, skip_special_tokens=True)
+            pred_raw = pred
 
             pred_clean = postprocess_prediction(pred, target)
             target_clean = strip_comments(target)
@@ -204,6 +205,7 @@ def main():
                 "repo": it["repo"],
                 "expected": target_clean,
                 "got": pred_clean,
+                "got_raw": pred_raw,
                 "exact_match": em,
                 "code_bleu": bleu,
                 "edit_similarity": edit_sim,

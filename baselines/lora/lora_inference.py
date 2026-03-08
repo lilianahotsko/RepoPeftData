@@ -19,7 +19,7 @@ from tqdm import tqdm
 # ── Config ────────────────────────────────────────────────────────────────────
 MODEL_NAME = "Qwen/Qwen2.5-Coder-1.5B"
 ADAPTER_PATH = "./qwen-coder-lora-adapter"  # Path to saved LoRA adapter
-MAX_NEW_TOKENS = 256
+MAX_NEW_TOKENS = 128
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

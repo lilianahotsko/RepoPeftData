@@ -110,6 +110,9 @@ def code_bleu_score(pred: str, ref: str, lang: str = "python") -> float:
     if not pred.strip() or not ref.strip():
         return 0.0
 
+    if pred.strip() == ref.strip():
+        return 1.0
+
     if _check_codebleu():
         try:
             from codebleu import calc_codebleu

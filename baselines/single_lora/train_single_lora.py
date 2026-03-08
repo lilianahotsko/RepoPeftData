@@ -16,6 +16,8 @@ import os
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
 import torch
 from datasets import Dataset
 from transformers import (
@@ -82,15 +84,24 @@ class PrefixTargetDataCollator(DataCollatorForLanguageModeling):
         return 0
 
 
-def load_all_training_pairs(splits_dir: Path) -> list[dict]:
-    """Load all QnA pairs from train.json."""
+def load_all_training_pairs(
+    splits_dir: Path,
+    oracle_cache_dir: Path | None = None,
+) -> list[dict]:
+    """Load all QnA pairs from train.json.
+    If *oracle_cache_dir* is given, prepend oracle context to each prefix."""
+    if oracle_cache_dir:
+        from evaluation.oracle_utils import load_oracle_cache, lookup_oracle_context, augment_prefix_with_oracle
+
     path = splits_dir / "train.json"
     if not path.exists():
         raise FileNotFoundError(f"train.json not found at {splits_dir}")
     data = json.loads(path.read_text(encoding="utf-8"))
     repos = data.get("repositories", {})
     pairs = []
+    n_augmented = 0
     for repo_name, r in repos.items():
+        oracle_contexts = load_oracle_cache(oracle_cache_dir, repo_name) if oracle_cache_dir else {}
         for p in r.get("qna_pairs", []):
             prefix = p.get("prefix", "")
             target = p.get("target", "")
@@ -98,7 +109,14 @@ def load_all_training_pairs(splits_dir: Path) -> list[dict]:
                 continue
             if target.lstrip().startswith(","):
                 continue
+            if oracle_contexts:
+                oracle_code = lookup_oracle_context(oracle_contexts, p.get("metadata", {}))
+                if oracle_code:
+                    prefix = augment_prefix_with_oracle(prefix, oracle_code)
+                    n_augmented += 1
             pairs.append({"prefix": prefix, "target": target, "repo": repo_name})
+    if oracle_cache_dir:
+        print(f"  Oracle context: augmented {n_augmented}/{len(pairs)} pairs ({100*n_augmented/max(1,len(pairs)):.1f}%)")
     return pairs
 
 
@@ -128,14 +146,25 @@ def main():
     ap.add_argument("--rank", type=int, default=16)
     ap.add_argument("--lora-alpha", type=int, default=32)
     ap.add_argument("--val-split", type=str, default="cr_val")
+    ap.add_argument("--use-oracle", action="store_true",
+                    help="Prepend oracle context to prefixes")
+    ap.add_argument("--oracle-cache-dir", type=str, default=None)
     ap.add_argument("--no-wandb", action="store_true")
     ap.add_argument("--seed", type=int, default=3407)
     args = ap.parse_args()
 
     splits_dir = Path(args.splits_dir).expanduser().resolve()
 
+    oracle_cache_dir = None
+    if args.use_oracle:
+        from evaluation.oracle_utils import get_default_oracle_cache_dir, load_oracle_cache, lookup_oracle_context, augment_prefix_with_oracle
+        oracle_cache_dir = Path(args.oracle_cache_dir or get_default_oracle_cache_dir()).expanduser().resolve()
+        if not oracle_cache_dir.exists():
+            raise FileNotFoundError(f"Oracle cache not found: {oracle_cache_dir}")
+        print(f"Using oracle context from {oracle_cache_dir}")
+
     print("Loading training data...")
-    train_pairs = load_all_training_pairs(splits_dir)
+    train_pairs = load_all_training_pairs(splits_dir, oracle_cache_dir=oracle_cache_dir)
     print(f"Loaded {len(train_pairs)} training pairs")
 
     val_path = splits_dir / f"{args.val_split}.json"
@@ -143,11 +172,17 @@ def main():
     if val_path.exists():
         val_data = json.loads(val_path.read_text(encoding="utf-8"))
         for repo_name, r in val_data.get("repositories", {}).items():
+            oracle_contexts = load_oracle_cache(oracle_cache_dir, repo_name) if oracle_cache_dir else {}
             for p in r.get("qna_pairs", []):
                 prefix = p.get("prefix", "")
                 target = p.get("target", "")
-                if prefix and target and not target.lstrip().startswith(","):
-                    val_pairs.append({"prefix": prefix, "target": target, "repo": repo_name})
+                if not prefix or not target or target.lstrip().startswith(","):
+                    continue
+                if oracle_contexts:
+                    oracle_code = lookup_oracle_context(oracle_contexts, p.get("metadata", {}))
+                    if oracle_code:
+                        prefix = augment_prefix_with_oracle(prefix, oracle_code)
+                val_pairs.append({"prefix": prefix, "target": target, "repo": repo_name})
     print(f"Loaded {len(val_pairs)} validation pairs")
 
     train_ds = Dataset.from_list(train_pairs)
@@ -199,10 +234,11 @@ def main():
         warmup_ratio=0.05,
         bf16=True,
         logging_steps=20,
-        eval_strategy="steps" if val_ds else "no",
-        eval_steps=500 if val_ds else None,
+        eval_strategy="epoch" if val_ds else "no",
         save_strategy="epoch",
-        save_total_limit=2,
+        save_total_limit=1,
+        load_best_model_at_end=True if val_ds else False,
+        metric_for_best_model="eval_loss" if val_ds else None,
         optim="paged_adamw_8bit",
         max_grad_norm=0.3,
         seed=args.seed,

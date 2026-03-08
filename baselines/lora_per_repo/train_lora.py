@@ -17,7 +17,10 @@ Other usage:
 
 import argparse
 import json
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from typing import List
 
 import torch
@@ -106,8 +109,17 @@ def load_qna_dataset(qna_path: str) -> list[dict]:
     return pairs
 
 
-def load_from_split(splits_dir: Path, split_name: str, limit_repos: int = 1) -> tuple[list[dict], str]:
-    """Load qna_pairs from split JSON. Returns (pairs, repo_full) e.g. repo_full='author/repo_name'."""
+def load_from_split(
+    splits_dir: Path, split_name: str, limit_repos: int = 1,
+    oracle_cache_dir: Path | None = None,
+    repo_filter: str | None = None,
+) -> tuple[list[dict], str]:
+    """Load qna_pairs from split JSON. Returns (pairs, repo_full).
+    If *repo_filter* is given, select only that repo (ignoring limit_repos).
+    If *oracle_cache_dir* is given, prepend oracle context to each prefix."""
+    if oracle_cache_dir:
+        from evaluation.oracle_utils import load_oracle_cache, lookup_oracle_context, augment_prefix_with_oracle
+
     path = splits_dir / f"{split_name}.json"
     if not path.exists():
         raise FileNotFoundError(f"Split file not found: {path}")
@@ -116,23 +128,43 @@ def load_from_split(splits_dir: Path, split_name: str, limit_repos: int = 1) -> 
     repo_names = sorted(repos.keys())
     if not repo_names:
         raise ValueError(f"No repositories in {path}")
-    repo_names = repo_names[:limit_repos]
+    if repo_filter:
+        if repo_filter not in repos:
+            raise ValueError(f"Repo {repo_filter!r} not found in {path}")
+        repo_names = [repo_filter]
+    else:
+        repo_names = repo_names[:limit_repos]
     pairs = []
     for repo in repo_names:
+        oracle_contexts = load_oracle_cache(oracle_cache_dir, repo) if oracle_cache_dir else {}
         r = repos[repo]
         for p in r.get("qna_pairs", []):
             prefix = p.get("prefix", "")
             target = p.get("target", "")
-            if prefix and target:
-                pairs.append({"prefix": prefix, "target": target})
+            if not prefix or not target:
+                continue
+            if target.lstrip().startswith(","):
+                continue
+            if oracle_contexts:
+                oracle_code = lookup_oracle_context(oracle_contexts, p.get("metadata", {}))
+                if oracle_code:
+                    prefix = augment_prefix_with_oracle(prefix, oracle_code)
+            pairs.append({"prefix": prefix, "target": target})
     if not pairs:
         raise ValueError(f"No qna_pairs in first {limit_repos} repo(s) of {path}")
     repo_full = repo_names[0] if repo_names else "unknown"
     return pairs, repo_full
 
 
-def load_val_for_repos(splits_dir: Path, val_split: str, repo_names: list[str]) -> list[dict]:
-    """Load qna_pairs from val_split (e.g. ir_val.json) for the given repos. Returns flat list of pairs."""
+def load_val_for_repos(
+    splits_dir: Path, val_split: str, repo_names: list[str],
+    oracle_cache_dir: Path | None = None,
+) -> list[dict]:
+    """Load qna_pairs from val_split for the given repos.
+    If *oracle_cache_dir* is given, prepend oracle context to each prefix."""
+    if oracle_cache_dir:
+        from evaluation.oracle_utils import load_oracle_cache, lookup_oracle_context, augment_prefix_with_oracle
+
     path = splits_dir / f"{val_split}.json"
     if not path.exists():
         return []
@@ -140,12 +172,20 @@ def load_val_for_repos(splits_dir: Path, val_split: str, repo_names: list[str]) 
     repos = data.get("repositories", {})
     pairs = []
     for repo in repo_names:
+        oracle_contexts = load_oracle_cache(oracle_cache_dir, repo) if oracle_cache_dir else {}
         r = repos.get(repo, {})
         for p in r.get("qna_pairs", []):
             prefix = p.get("prefix", "")
             target = p.get("target", "")
-            if prefix and target:
-                pairs.append({"prefix": prefix, "target": target})
+            if not prefix or not target:
+                continue
+            if target.lstrip().startswith(","):
+                continue
+            if oracle_contexts:
+                oracle_code = lookup_oracle_context(oracle_contexts, p.get("metadata", {}))
+                if oracle_code:
+                    prefix = augment_prefix_with_oracle(prefix, oracle_code)
+            pairs.append({"prefix": prefix, "target": target})
     return pairs
 
 
@@ -207,6 +247,12 @@ def main():
         help="When using --from-split: use first N repos (default: 1)",
     )
     parser.add_argument(
+        "--repo-name",
+        type=str,
+        default=None,
+        help="When using --from-split: train on this specific repo (overrides --limit-repos)",
+    )
+    parser.add_argument(
         "--val-split",
         type=str,
         default="ir_val",
@@ -224,23 +270,46 @@ def main():
     parser.add_argument("--lr", type=float, default=2e-4, help="Learning rate")
     parser.add_argument("--max-seq-length", type=int, default=2048, help="Max sequence length")
     parser.add_argument("--val-ratio", type=float, default=0.15, help="Validation split ratio")
+    parser.add_argument("--use-oracle", action="store_true",
+                        help="Prepend oracle context to prefixes")
+    parser.add_argument("--oracle-cache-dir", type=str, default=None)
     parser.add_argument("--no-wandb", action="store_true", help="Disable wandb logging")
     args = parser.parse_args()
 
     scratch = os.environ.get("SCRATCH", os.path.expanduser("~/scratch"))
     default_output_base = os.path.join(scratch, "TRAINING_CHECKPOINTS", "PER_REPO_LORA")
 
+    oracle_cache_dir = None
+    if args.use_oracle:
+        from evaluation.oracle_utils import get_default_oracle_cache_dir
+        oracle_cache_dir = Path(args.oracle_cache_dir or get_default_oracle_cache_dir()).expanduser().resolve()
+        if not oracle_cache_dir.exists():
+            raise FileNotFoundError(f"Oracle cache not found: {oracle_cache_dir}")
+        print(f"Using oracle context from {oracle_cache_dir}")
+
     # Resolve data source
     if args.from_split:
         splits_dir = Path(args.splits_dir).expanduser().resolve()
-        print(f"Loading train from {args.from_split}.json (first {args.limit_repos} repo(s))")
-        train_pairs, repo_full = load_from_split(splits_dir, args.from_split, limit_repos=args.limit_repos)
+        if args.repo_name:
+            print(f"Loading train from {args.from_split}.json for repo {args.repo_name}")
+        else:
+            print(f"Loading train from {args.from_split}.json (first {args.limit_repos} repo(s))")
+        train_pairs, repo_full = load_from_split(
+            splits_dir, args.from_split, limit_repos=args.limit_repos,
+            oracle_cache_dir=oracle_cache_dir,
+            repo_filter=args.repo_name,
+        )
         examples = qna_to_examples(train_pairs)
-        # Validation from ir_val.json for the same repos
         path = splits_dir / f"{args.from_split}.json"
         data = json.loads(path.read_text(encoding="utf-8"))
-        repo_names = sorted(data.get("repositories", {}).keys())[: args.limit_repos]
-        val_pairs = load_val_for_repos(splits_dir, args.val_split, repo_names)
+        if args.repo_name:
+            repo_names = [args.repo_name]
+        else:
+            repo_names = sorted(data.get("repositories", {}).keys())[: args.limit_repos]
+        val_pairs = load_val_for_repos(
+            splits_dir, args.val_split, repo_names,
+            oracle_cache_dir=oracle_cache_dir,
+        )
         val_examples = qna_to_examples(val_pairs)
     elif args.qna_path:
         qna_path = Path(args.qna_path)
@@ -334,7 +403,11 @@ def main():
         warmup_ratio=0.1,
         bf16=True,
         logging_steps=10,
+        eval_strategy="epoch",
         save_strategy="epoch",
+        save_total_limit=1,
+        load_best_model_at_end=True,
+        metric_for_best_model="eval_loss",
         optim="paged_adamw_8bit",
         max_grad_norm=0.3,
         report_to="none" if args.no_wandb else "wandb",
