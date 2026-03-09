@@ -18,7 +18,6 @@ python baselines/single_lora/train_single_lora.py \
     --splits-dir "$SPLITS_DIR" \
     --output-dir "$CKPT_DIR/SINGLE_LORA" \
     --max-seq-length 2048 \
-    --epochs 3 --batch-size 4 --grad-accum 4 --lr 2e-4 \
-    --no-wandb
+    --epochs 3 --batch-size 4 --grad-accum 4 --lr 2e-4
 
 echo "Done: $(date)"

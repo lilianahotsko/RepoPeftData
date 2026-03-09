@@ -19,7 +19,6 @@ python baselines/lora_per_repo/run_all_repos.py \
     --output-base "$CKPT_DIR/PER_REPO_LORA" \
     --limit-repos 10 \
     --eval-split ir_test \
-    --epochs 3 \
-    --no-wandb
+    --epochs 3
 
 echo "Done: $(date)"

@@ -132,7 +132,7 @@ def main():
     ap.add_argument("--device", type=str, default="cuda")
     args = ap.parse_args()
 
-    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+    from transformers import AutoModelForCausalLM, AutoTokenizer
     from peft import PeftModel
 
     adapter_path = Path(args.adapter).expanduser().resolve()
@@ -166,16 +166,10 @@ def main():
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
 
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16,
-        bnb_4bit_use_double_quant=True,
-    )
     base_model = AutoModelForCausalLM.from_pretrained(
         args.model_name,
-        quantization_config=bnb_config,
-        device_map="auto",
+        torch_dtype=torch.bfloat16,
+        device_map={"": args.device},
         trust_remote_code=True,
     )
     model = PeftModel.from_pretrained(base_model, str(adapter_path))

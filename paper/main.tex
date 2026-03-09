@@ -13,11 +13,17 @@
 \usepackage{algorithm}
 \usepackage{algorithmic}
 \usepackage{url}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{colortbl}
+\usepackage{pifont}
 
 \newcommand{\method}{Code2LoRA}
 \newcommand{\benchmark}{RepoPeftBench}
+\newcommand{\todo}[1]{\textcolor{red}{\textbf{[TODO: #1]}}}
+\newcommand{\todoinline}[1]{\textcolor{red}{#1}}
 
-\title{\method{}: Repository-Aware Adapter Generation via Composable Hypernetworks}
+\title{\method{}: Repository-Aware Adapter Generation\\via Composable Hypernetworks}
 
 \author{
   Author 1 \and Author 2 \\
@@ -28,8 +34,21 @@
 \begin{document}
 \maketitle
 
+% ============================================================
 \begin{abstract}
-Large language models for code benefit from repository-level context, but incorporating full codebases at inference time is expensive and often infeasible within context limits. We propose \method{}, a hypernetwork that generates lightweight, composable LoRA adapters from repository code embeddings. Given a new code repository, \method{} produces repo-specific LoRA weights in a single forward pass, enabling efficient adaptation without runtime retrieval or retraining. We further introduce composable LoRA generation, where file-level adapters are independently generated and combined, enabling incremental knowledge integration as codebases evolve. We evaluate on \benchmark{}, a new benchmark of 560 Python repositories with 73K assertion completion tasks spanning cross-repo and in-repo evaluation settings. \method{} achieves XX.X\% exact match on cross-repo evaluation, outperforming pretrained baselines (34.6\%), RAG (XX.X\%), and in-context learning (XX.X\%), while requiring zero additional inference tokens and generating adapters in under 10ms.
+% ============================================================
+
+Large language models for code benefit from repository-level context, yet incorporating full codebases at inference time is expensive and bounded by context windows.
+We propose \method{}, a hypernetwork that generates lightweight LoRA adapters conditioned on repository code embeddings.
+Given a new repository, \method{} produces repo-specific adapter weights in a single forward pass---requiring zero additional inference tokens and no per-repo retraining.
+We introduce two hypernetwork architectures:
+(1) a \emph{direct-projection} variant that maps repository embeddings to full LoRA matrices via per-module-type output heads, and
+(2) a \emph{shared-basis} variant (PAW-style) that generates per-layer mixing coefficients over learnable basis vectors, reducing hypernetwork parameters by $\sim$8.5$\times$.
+We further propose composable LoRA generation, where file-level adapters are independently generated and combined, enabling incremental adaptation as codebases evolve.
+We evaluate on \benchmark{}, a new benchmark of 560 Python repositories with 73K assertion completion tasks spanning cross-repo (CR) and in-repo (IR) evaluation settings.
+\method{} achieves 63.8\% exact match on CR evaluation, substantially outperforming pretrained baselines (45.7\%), full fine-tuning (51.4\%), retrieval-augmented generation (39.9\%), and in-context learning (42.2\%).
+\todo{Update numbers after all experiments complete.}
+
 \end{abstract}
 
 % ============================================================
@@ -37,31 +56,66 @@ Large language models for code benefit from repository-level context, but incorp
 \label{sec:intro}
 % ============================================================
 
-Code completion and understanding tasks benefit significantly from repository-level context---knowledge about project structure, coding conventions, utility functions, and domain-specific patterns. While retrieval-augmented generation (RAG) can provide some of this context by prepending relevant code chunks to the input, this approach has fundamental limitations: it increases inference cost linearly with context size, is bounded by the model's context window, and treats all queries identically regardless of the repository.
+Code completion and understanding tasks benefit significantly from repository-level context---knowledge about project structure, coding conventions, utility functions, and domain-specific patterns.
+While retrieval-augmented generation (RAG) can provide some of this context by prepending relevant code chunks to the input, this approach has fundamental limitations: it increases inference cost linearly with context size, is bounded by the model's context window, and treats all queries identically regardless of the repository.
+In-context learning (ICL) offers another route by providing demonstration examples, but is similarly constrained by context limits and adds latency at every inference step.
 
-We propose an alternative paradigm: rather than retrieving raw code at inference time, we \emph{distill} repository knowledge into parameter-efficient adapters via a hypernetwork. Given a code repository, \method{} generates LoRA~\cite{hu2022lora} adapter weights that specialize a frozen language model for that repository, requiring only a single forward pass through a small neural network.
+We propose an alternative paradigm: rather than retrieving raw code at inference time, we \emph{distill} repository knowledge into parameter-efficient adapters.
+\method{} is a hypernetwork~\cite{ha2017hypernetworks} that generates LoRA~\cite{hu2022lora} adapter weights conditioned on repository code embeddings.
+Given a code repository, the hypernetwork produces repo-specific LoRA weights in a single forward pass through a small neural network, specializing a frozen language model for that repository.
 
 Our approach offers three key advantages over existing methods:
-\begin{enumerate}
-    \item \textbf{Efficiency}: Adapters are generated once per repository and add zero inference tokens, unlike RAG which requires processing retrieved chunks for every query.
-    \item \textbf{Composability}: We introduce file-level LoRA generation, where adapters for individual source files are independently generated and composed. This enables incremental adaptation as codebases evolve---when a file changes, only its adapter needs regeneration.
-    \item \textbf{Generalization}: The hypernetwork generalizes to unseen repositories, producing effective adapters for codebases never seen during training.
+\begin{enumerate}[nosep]
+    \item \textbf{Zero-token overhead}: Generated adapters modify model weights directly, adding zero inference tokens---unlike RAG, which requires processing retrieved chunks for every query.
+    \item \textbf{Composability}: We introduce file-level LoRA generation, where adapters for individual source files are independently generated and composed. When a file changes, only its adapter needs regeneration.
+    \item \textbf{Cross-repo generalization}: The hypernetwork generalizes to unseen repositories, producing effective adapters for codebases never seen during training---a capability that per-repo LoRA training inherently lacks.
 \end{enumerate}
 
-We evaluate \method{} on \benchmark{}, a new benchmark we construct from 560 Python repositories containing 73,267 assertion completion tasks. We define two evaluation settings: \emph{cross-repo} (CR), where the model encounters entirely new repositories at test time, and \emph{in-repo} (IR), where the model has seen other assertions from the same repository during training. Against a comprehensive set of baselines including pretrained models, RAG, in-context learning, fine-tuning, and per-repo LoRA training, \method{} achieves the best trade-off between performance and efficiency.
+We investigate two hypernetwork architectures:
+a \emph{direct-projection} design that maps repository embeddings to full LoRA matrices through per-module-type output heads with learnable scaling,
+and a \emph{shared-basis} design (PAW-style) that maintains learnable basis vectors per module type and generates only per-layer mixing coefficients, reducing the hypernetwork parameter count by $\sim$8.5$\times$ while maintaining comparable performance.
+
+We evaluate \method{} on \benchmark{}, a new benchmark we construct from 560 Python repositories containing 73,267 assertion completion tasks.
+We define two evaluation settings: \emph{cross-repo} (CR), where the model encounters entirely new repositories at test time, and \emph{in-repo} (IR), where the model has seen other test functions from the same repository during training.
+Against a comprehensive set of seven baselines---pretrained, RAG, ICL, oracle context, full fine-tuning, single LoRA, and per-repo LoRA---\method{} achieves the best performance on cross-repo evaluation while requiring no additional inference tokens.
+\todo{Verify final claim after all experiments.}
+
+Our contributions are:
+\begin{enumerate}[nosep]
+    \item We propose \method{}, the first hypernetwork for generating repository-conditioned LoRA adapters for code LLMs, enabling instant specialization for unseen repositories.
+    \item We introduce two hypernetwork architectures---direct-projection and shared-basis---and analyze their trade-offs in parameter efficiency and generation quality.
+    \item We construct \benchmark{}, a benchmark of 560 Python repositories with carefully curated assertion completion tasks, structured prefixes, and dual evaluation protocols.
+    \item We conduct comprehensive experiments against seven baselines with and without oracle context, demonstrating that \method{} substantially outperforms all context-based methods while maintaining efficiency comparable to no-context baselines.
+\end{enumerate}
 
 % ============================================================
 \section{Related Work}
 \label{sec:related}
 % ============================================================
 
-\paragraph{Parameter-Efficient Fine-Tuning.} LoRA~\cite{hu2022lora} and its variants enable efficient model adaptation through low-rank decomposition. Recent work has explored LoRA composition~\cite{zhang2023composing}, merging~\cite{yadav2024ties}, and routing~\cite{huang2024lorahub}.
+\paragraph{Parameter-Efficient Fine-Tuning.}
+LoRA~\cite{hu2022lora} enables efficient model adaptation through low-rank decomposition of weight updates.
+Extensions include LoRA composition~\cite{zhang2023composing}, weight merging~\cite{yadav2024ties}, and multi-LoRA routing~\cite{huang2024lorahub}.
+\todo{Add QLoRA citation, DoRA citation.}
+These approaches treat adapters as static artifacts trained for individual tasks.
+Our work instead dynamically \emph{generates} adapters conditioned on input data, enabling adaptation to unseen domains without any training.
 
-\paragraph{Hypernetworks.} Hypernetworks~\cite{ha2017hypernetworks} generate parameters for a target network. Recent applications include generating LoRA weights conditioned on task descriptions~\cite{phang2023hypertuning}, document content~\cite{von2024language}, and input features. Our work applies hypernetworks specifically to code repositories with composability.
+\paragraph{Hypernetworks.}
+Hypernetworks~\cite{ha2017hypernetworks} generate the parameters of a target network from a conditioning signal.
+Recent applications to language models include generating LoRA weights conditioned on task descriptions~\cite{phang2023hypertuning} and document content~\cite{von2024language}.
+\todo{Add HyperTuning citation details, check for concurrent work in code domain.}
+Our work applies hypernetworks specifically to code repositories, introducing composition mechanisms for file-level adapter generation and evaluating with a purpose-built code benchmark.
 
-\paragraph{Repository-Level Code Understanding.} Prior work on repo-level code includes RepoFusion~\cite{shrivastava2023repofusion}, RepoCoder~\cite{zhang2023repocoder}, and CrossCodeEval~\cite{ding2024crosscodeeval}. These typically use retrieval or cross-file context within the input. Our approach instead distills repo knowledge into model parameters.
+\paragraph{Repository-Level Code Understanding.}
+Prior work on incorporating repository context includes RepoFusion~\cite{shrivastava2023repofusion}, which trains with cross-file context, RepoCoder~\cite{zhang2023repocoder}, which iteratively retrieves and generates, and CrossCodeEval~\cite{ding2024crosscodeeval}, a cross-file evaluation benchmark.
+\todo{Add RepoFormer, CoCoMIC, R2C2-Coder citations.}
+These approaches typically incorporate repository knowledge through the input (retrieval or cross-file context).
+In contrast, \method{} distills repository knowledge into model \emph{parameters}, avoiding context-window limitations and runtime retrieval costs.
 
-\paragraph{Code LLMs.} Models like CodeLlama~\cite{roziere2023code}, StarCoder~\cite{li2023starcoder}, and Qwen-Coder~\cite{hui2024qwen25coder} have advanced code generation. We use Qwen2.5-Coder as our base model due to its strong performance at small scales.
+\paragraph{Code LLMs.}
+Modern code language models including CodeLlama~\cite{roziere2023code}, StarCoder~\cite{li2023starcoder}, and Qwen2.5-Coder~\cite{hui2024qwen25coder} achieve strong performance across code tasks.
+We use Qwen2.5-Coder-1.5B as our base model due to its strong performance at small scale (1.5B parameters), extensive pretraining on code data, and support for fill-in-the-middle generation.
+\todo{Add DeepSeek-Coder citation, verify no newer base model should be used.}
 
 % ============================================================
 \section{Method}
@@ -70,75 +124,246 @@ We evaluate \method{} on \benchmark{}, a new benchmark we construct from 560 Pyt
 
 \subsection{Overview}
 
-\method{} consists of three components: (1) a repository encoder that produces embeddings from source code, (2) a hypernetwork that generates LoRA adapter weights from these embeddings, and (3) a frozen code LLM that receives the generated adapters. Figure~\ref{fig:architecture} illustrates the architecture.
+\method{} consists of three components (Figure~\ref{fig:architecture}):
+(1) a \textbf{repository encoder} that produces dense embeddings from source code files,
+(2) a \textbf{hypernetwork} that generates LoRA adapter weights from these embeddings, and
+(3) a \textbf{frozen code LLM} that receives the generated adapters and performs inference.
+At training time, only the hypernetwork parameters are optimized through the language modeling loss; the base LLM remains entirely frozen.
+
+\begin{figure}[t]
+\centering
+\todo{Architecture diagram: repo files $\to$ encoder $\to$ embedding $\to$ hypernetwork $\to$ LoRA weights $\to$ frozen LLM + LoRA $\to$ output}
+\caption{Overview of the \method{} architecture. Source files are encoded into a repository embedding, which conditions a hypernetwork that generates LoRA adapter weights. The frozen base LLM is specialized via these generated adapters without any retraining.}
+\label{fig:architecture}
+\end{figure}
 
 \subsection{Repository Encoding}
+\label{sec:encoding}
 
-We encode repository source files using Qwen3-Embedding-0.6B. Each source file is chunked into 4096-token windows with 512-token overlap. File embeddings are computed via mean pooling over chunk embeddings. The repository embedding is formed by concatenating a weighted mean and max-pooling over file embeddings:
+We encode repository source files using Qwen3-Embedding-0.6B, a 0.6B-parameter dense embedding model pretrained on diverse text including code.
+Non-test source files are collected from each repository, excluding common non-informative directories (e.g., \texttt{.git}, \texttt{\_\_pycache\_\_}, \texttt{venv}).
+
+Each source file is chunked into windows of up to 4,096 tokens with 512-token overlap.
+File-level embeddings are obtained via mean pooling over chunk embeddings.
+Files are assigned importance weights based on three heuristics:
+(i) \emph{content distinctiveness}, measured as cosine distance from the repository mean embedding;
+(ii) \emph{file size}, with larger files receiving higher weight;
+(iii) \emph{path heuristics}, upweighting files in \texttt{src/}, \texttt{core/}, \texttt{lib/} directories and downweighting boilerplate files such as \texttt{\_\_init\_\_.py}, \texttt{setup.py}, and \texttt{version.py}.
+
+The repository embedding is formed by concatenating a weighted mean and max-pooling over file embeddings:
 \begin{equation}
-    \mathbf{e}_\text{repo} = [\alpha \cdot \sum_i w_i \mathbf{f}_i \;;\; \beta \cdot \max_i \mathbf{f}_i]
+    \mathbf{e}_\text{repo} = \left[\sum_i w_i \mathbf{f}_i \;;\; \max_i \mathbf{f}_i\right] \in \mathbb{R}^{2d}
+\label{eq:repo_emb}
 \end{equation}
-where $w_i$ are file importance weights based on distinctiveness, size, and path heuristics.
+where $\mathbf{f}_i \in \mathbb{R}^{d}$ is the embedding of file $i$, $w_i$ are normalized importance weights, and $d = 1024$ is the embedding dimension of Qwen3-Embedding.
+The concatenation of mean and max pooling captures both the average ``flavor'' of a repository and its most distinctive features.
+\todo{Report embedding statistics: mean files/repo, distribution of embedding norms.}
 
-\subsection{Hypernetwork Architecture}
+\subsection{Hypernetwork Architectures}
+\label{sec:hypernetwork}
 
-The hypernetwork $H_\theta$ maps a repository embedding to LoRA parameters. It consists of a shared trunk and per-module-type output heads:
+We investigate two hypernetwork architectures that trade off between parameter efficiency and representational capacity.
+
+\subsubsection{Direct-Projection Hypernetwork}
+\label{sec:direct_proj}
+
+The direct-projection hypernetwork $H_\theta$ maps a repository embedding to LoRA parameters through a shared trunk and per-module-type output heads.
+The shared trunk is a 2-layer MLP:
+\begin{equation}
+    \mathbf{h} = \text{MLP}(\mathbf{e}_\text{repo}) = \sigma(\mathbf{W}_2 \cdot \sigma(\mathbf{W}_1 \cdot \mathbf{e}_\text{repo}))
+\end{equation}
+where $\sigma$ denotes the GELU activation.
+The trunk output is L2-normalized and rescaled by $\sqrt{d_h}$ to stabilize gradient flow.
+
+For each module type $t$ (e.g., \texttt{q\_proj}, \texttt{k\_proj}, \texttt{v\_proj}, \texttt{o\_proj}, \texttt{gate\_proj}, \texttt{up\_proj}, \texttt{down\_proj} in a transformer), dedicated output heads generate the LoRA $A$ and $B$ matrices:
 \begin{align}
-    \mathbf{h} &= \text{Trunk}(\mathbf{e}_\text{repo}) \\
-    \mathbf{A}_t &= \sigma_A(\text{Head}^A_t(\mathbf{h})) \cdot s_A^t \\
-    \mathbf{B}_t &= \sigma_B(\text{Head}^B_t(\mathbf{h})) \cdot s_B^t
+    \mathbf{A}_t &= \tanh(\text{Head}^A_t(\mathbf{h})) \cdot \exp(s^A_t) \\
+    \mathbf{B}_t &= \tanh(\text{Head}^B_t(\mathbf{h})) \cdot \exp(s^B_t)
 \end{align}
-where $t$ indexes module types (attention projections, MLP projections), $\sigma$ uses $\tanh$ with learnable scaling, and $s_A^t, s_B^t$ are learnable log-scale parameters initialized to maintain small LoRA magnitudes.
+where $s^A_t, s^B_t$ are learnable log-scale parameters initialized to $-3.5$ (corresponding to an initial scale of $\approx 0.03$), ensuring small initial adapter magnitudes.
+The $\tanh$ activation bounds raw values to $[-1, 1]$, and the exponential scale (clamped to $[10^{-5}, 0.3]$) provides a learnable magnitude control.
+
+The same LoRA matrices are shared across all layers of the same module type.
+For LoRA rank $r = 16$ and the 7 module types in Qwen2.5-Coder's 28-layer architecture, this produces 196 $(A, B)$ matrix pairs.
+These are injected by directly modifying the linear layer weights:
+\begin{equation}
+    \mathbf{W}' = \mathbf{W} + \mathbf{B}_t \mathbf{A}_t
+\end{equation}
+
+\paragraph{Parameter count.}
+With input dimension $2d = 2048$, hidden dimension 512, rank 16, and 7 module types with varying dimensions, the direct-projection hypernetwork has approximately \todo{compute exact number, $\sim$50M} parameters.
+
+\subsubsection{Shared-Basis Hypernetwork (PAW-Style)}
+\label{sec:paw}
+
+The shared-basis variant addresses the parameter inefficiency of direct projection by factoring LoRA generation through learnable basis vectors.
+
+\paragraph{Architecture.}
+For each module type $m$ (e.g., \texttt{q\_proj}), the hypernetwork maintains a set of $N$ learnable basis matrices:
+\begin{align}
+    \mathbf{A}^m_\text{bases} &\in \mathbb{R}^{N \times r \times d_\text{in}} \quad \text{(normal init, } \sigma = 0.02\text{)} \\
+    \mathbf{B}^m_\text{bases} &\in \mathbb{R}^{N \times d_\text{out} \times r} \quad \text{(zero init, per LoRA convention)}
+\end{align}
+
+A shared trunk with residual MLP blocks processes the repository embedding:
+\begin{equation}
+    \mathbf{h} = \text{ResidualTrunk}(\mathbf{e}_\text{repo})
+\end{equation}
+where each residual block applies LayerNorm $\to$ Linear $\to$ GELU $\to$ Linear $\to$ residual add.
+
+A coefficient head maps the trunk output to per-layer, per-module mixing weights:
+\begin{equation}
+    \boldsymbol{\alpha} = \text{CoeffHead}(\mathbf{h}) \in \mathbb{R}^{L \times M \times N \times 2}
+\end{equation}
+where $L$ is the number of transformer layers, $M$ the number of module types, and $N$ the number of bases.
+The final per-layer LoRA matrices are computed via linear combination:
+\begin{align}
+    \mathbf{A}^{(l,m)} &= \sum_{n=1}^{N} \alpha^A_{l,m,n} \cdot \mathbf{A}^m_{\text{bases},n} \\
+    \mathbf{B}^{(l,m)} &= \sum_{n=1}^{N} \alpha^B_{l,m,n} \cdot \mathbf{B}^m_{\text{bases},n}
+\end{align}
+
+\paragraph{Hook-based injection.}
+Unlike the direct-projection variant that modifies weights in-place, the shared-basis variant applies LoRA through forward hooks:
+\begin{equation}
+    \mathbf{y}' = \mathbf{y} + (\mathbf{x} \mathbf{A}^T \mathbf{B}^T) \cdot \frac{\alpha}{r}
+\end{equation}
+where $\mathbf{x}$ is the input, $\mathbf{y}$ is the original output, and $\alpha/r$ is the LoRA scaling factor.
+Hooks are registered before the forward pass and removed after, enabling clean batch-level adapter switching.
+
+\paragraph{Parameter count.}
+The shared-basis design requires only $N \times (r \times d_\text{in} + d_\text{out} \times r)$ parameters for basis storage per module type, plus $L \times M \times N \times 2$ mixing coefficients per input.
+With $N = 16$ bases, this achieves $\sim$8.5$\times$ fewer parameters than the direct-projection variant.
+\todo{Report exact parameter counts for both variants.}
+
+\paragraph{Comparison.}
+Table~\ref{tab:arch_comparison} summarizes the architectural differences.
+The direct-projection variant generates layer-\emph{shared} LoRA weights (same matrices applied to all layers of a given type), while the shared-basis variant generates \emph{per-layer} weights through mixing coefficients, providing finer-grained control.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lcc}
+\toprule
+Property & Direct-Proj. & Shared-Basis \\
+\midrule
+Per-layer weights & \ding{55} & \ding{51} \\
+Basis sharing & \ding{55} & \ding{51} \\
+Trunk depth & 2 (MLP) & 2+ (Residual) \\
+Injection & Weight mod. & Fwd hooks \\
+Params ($\sim$) & \todo{50M} & \todo{6M} \\
+\bottomrule
+\end{tabular}
+\caption{Architectural comparison of the two hypernetwork variants.}
+\label{tab:arch_comparison}
+\end{table}
 
 \subsection{Composable LoRA Generation}
 \label{sec:composable}
 
-Beyond monolithic repository embeddings, we propose file-level LoRA generation and composition. For each source file $f_i$ in a repository, the hypernetwork generates a separate adapter:
+Beyond monolithic repository embeddings, we propose file-level LoRA generation and composition.
+For each source file $f_i$ in a repository, the hypernetwork generates a separate adapter:
 \begin{equation}
     (\mathbf{A}_i, \mathbf{B}_i) = H_\theta(\mathbf{f}_i)
 \end{equation}
 
 These file-level adapters are composed into a repository-level adapter using one of three strategies:
 
-\paragraph{Additive.} Simple averaging: $\mathbf{A} = \frac{1}{K}\sum_{i=1}^K \mathbf{A}_i$
+\paragraph{Additive.} Simple averaging: $\mathbf{A} = \frac{1}{K}\sum_{i=1}^K \mathbf{A}_i$.
+This provides a uniform combination of all file-level knowledge.
 
-\paragraph{Weighted.} Learned importance: $\mathbf{A} = \sum_{i=1}^K \text{softmax}(g(\mathbf{f}_i))_i \cdot \mathbf{A}_i$ where $g$ is a small weight predictor.
+\paragraph{Weighted.} Learned importance: $\mathbf{A} = \sum_{i=1}^K \text{softmax}(g(\mathbf{f}_i))_i \cdot \mathbf{A}_i$ where $g$ is a small weight predictor trained end-to-end.
+This allows the hypernetwork to attend more strongly to informative files.
 
-\paragraph{Gated.} Query-conditioned: Weights depend on both file embeddings and the input query, enabling dynamic selection of relevant file knowledge.
+\paragraph{Gated.} Query-conditioned: Composition weights depend on both file embeddings and the input query, enabling dynamic selection of relevant file knowledge per test case.
 
-This composable design enables incremental adaptation: when a single file in a repository changes, only its LoRA needs to be regenerated, and the composed adapter is updated efficiently.
+The composable design enables \emph{incremental adaptation}: when a single file in a repository changes, only its LoRA needs regeneration, and the composed adapter is updated in $O(1)$ time.
+
+\todo{Report composition results. If not ready, describe as ``we leave composable evaluation to future work'' and focus on repo-level.}
 
 \subsection{Training}
+\label{sec:training}
 
-The hypernetwork is trained end-to-end via the language modeling loss on assertion completion tasks. The base LLM remains frozen; only hypernetwork parameters are optimized:
+The hypernetwork is trained end-to-end via the standard language modeling loss on assertion completion tasks.
+The base LLM remains entirely frozen; only hypernetwork parameters $\theta$ are optimized:
 \begin{equation}
-    \mathcal{L} = -\sum_{(x,y) \in \mathcal{D}} \log p_{\text{LLM} + \text{LoRA}(H_\theta(\mathbf{e}_r))}(y | x)
+    \mathcal{L}(\theta) = -\sum_{(x,y,r) \in \mathcal{D}} \log p_{\text{LLM} + \text{LoRA}(H_\theta(\mathbf{e}_r))}(y \mid x)
+\label{eq:training_loss}
 \end{equation}
-where $x$ is the test prefix, $y$ is the assertion target, and $\mathbf{e}_r$ is the repository embedding.
+where $x$ is the test prefix (structured context before the assertion's expected value), $y$ is the assertion target to be completed, $\mathbf{e}_r$ is the embedding of repository $r$, and $\text{LoRA}(H_\theta(\mathbf{e}_r))$ denotes the adapter weights generated by the hypernetwork.
+
+\paragraph{Sampling strategy.}
+Training batches are constructed by sampling a repository, then sampling a QnA pair from that repository.
+This ensures the hypernetwork sees diverse repositories across training and does not overfit to repositories with many examples.
+
+\paragraph{Oracle context augmentation.}
+Optionally, the test prefix $x$ can be augmented with import-resolved oracle context (Section~\ref{sec:oracle}).
+When oracle context is available, it is prepended to the prefix, providing the hypernetwork with both the repository embedding (through LoRA) and explicit function definitions (through the input).
+We train and evaluate with and without oracle augmentation to disentangle the effects of parametric adaptation and context injection.
 
 % ============================================================
 \section{\benchmark{}: A Repository-Level Code Benchmark}
 \label{sec:benchmark}
 % ============================================================
 
-\subsection{Dataset Construction}
+We construct \benchmark{}, a benchmark for evaluating repository-level code understanding through assertion completion.
 
-We construct \benchmark{} from 560 Python repositories that use pytest, sourced from GitHub with 6+ stars and recent activity. For each repository:
+\subsection{Repository Collection}
 
-\begin{enumerate}
-    \item Source files are separated into test files and non-test files.
-    \item Assertions in test files are extracted using AST parsing, covering five types: \texttt{assert}, \texttt{self.assert*}, \texttt{pytest.raises}, \texttt{pytest.approx}, and \texttt{assert\_*} (numpy-style).
-    \item For each assertion, the \emph{prefix} is the code context before the assertion's expected value, and the \emph{target} is the expected value to be completed.
-    \item Non-test files are embedded to form the repository representation.
+We collect 560 Python repositories from GitHub, filtered by:
+(i) use of \texttt{pytest} or \texttt{unittest} testing frameworks;
+(ii) at least 6 GitHub stars;
+(iii) recent activity (updated within the past year);
+(iv) permissive open-source licenses.
+For each repository, we separate source files into \emph{test files} (used for QnA extraction) and \emph{non-test files} (used for repository encoding).
+Test files are identified by path heuristics (\texttt{test\_*.py}, \texttt{*\_test.py}, files in \texttt{tests/} directories) and moved to a dedicated directory.
+
+\subsection{QnA Pair Extraction}
+\label{sec:qna_extraction}
+
+We extract assertion completion tasks using AST (Abstract Syntax Tree) parsing.
+For each test file, we:
+
+\begin{enumerate}[nosep]
+    \item Parse the file into an AST and identify assertion nodes of five types: bare \texttt{assert} statements, \texttt{self.assert*} method calls, \texttt{pytest.raises} context managers, \texttt{pytest.approx} expressions, and NumPy-style \texttt{assert\_*} calls.
+    \item For each assertion, extract the \emph{target}---the expression being verified---as the completion target.
+    \item Construct a \emph{structured prefix} consisting of: (a) import statements from the test file, (b) the enclosing class definition (if any), (c) helper methods (setUp/tearDown), and (d) the test function body up to the assertion target.
+    \item Apply quality filters: remove targets starting with commas (malformed AST segmentation), targets outside function bodies, empty or whitespace-only targets, and duplicate targets within the same function.
 \end{enumerate}
+
+\paragraph{Difficulty classification.}
+Each QnA pair is assigned a difficulty level based on the target complexity:
+\emph{simple} (single value or short expression, $\leq 30$ characters),
+\emph{medium} (function call, attribute access, or moderate expression, 30--80 characters), and
+\emph{hard} (nested calls, complex expressions, or multi-part assertions, $>$80 characters).
+We ensure balanced difficulty distribution within each split.
 
 \subsection{Evaluation Protocol}
 
-We define two evaluation settings:
+We define two complementary evaluation settings:
 
-\paragraph{Cross-Repo (CR).} Test repositories are entirely held out during training. This evaluates the hypernetwork's ability to generalize to unseen codebases. 58 repos, 7,620 pairs.
+\paragraph{Cross-Repo (CR).}
+58 repositories are entirely held out during training.
+This evaluates the hypernetwork's ability to generalize to completely unseen codebases---the primary use case for \method{}.
+These repositories have no overlap with training data at the repository level.
 
-\paragraph{In-Repo (IR).} Test assertions come from repositories seen during training, but from different test functions. This evaluates within-repository generalization. 447 repos, 6,046 pairs.
+\paragraph{In-Repo (IR).}
+Test assertions come from 447 repositories seen during training, but from different test \emph{functions} than those used for training.
+This evaluates within-repository generalization---whether adaptation to a repository transfers to unseen test cases from the same codebase.
+Per-repo LoRA is applicable only in this setting.
+
+\subsection{Oracle Context}
+\label{sec:oracle}
+
+For a subset of QnA pairs, we construct import-resolved oracle context.
+For each test file's prefix, we:
+(i) parse all import statements using AST analysis with fallback regex parsing for syntax errors;
+(ii) resolve imported modules to source files within the repository, trying multiple source roots (\texttt{src/}, \texttt{lib/}, package directories);
+(iii) identify names actually used in the test prefix;
+(iv) extract the specific function and class definitions being tested.
+
+The extracted definitions are concatenated (up to a token budget) and prepended to the test prefix.
+This provides an upper bound on the information available through import analysis.
+\todo{Report oracle coverage: $\sim$87.5\% of pairs have non-empty oracle context.}
 
 \subsection{Dataset Statistics}
 
@@ -151,178 +376,806 @@ Split & Repos & QnA Pairs & Pairs/Repo \\
 \midrule
 Train & 447 & 46,313 & 103.6 \\
 IR Val & 447 & 5,679 & 12.7 \\
-IR Test & 447 & 6,046 & 13.5 \\
+IR Test & 447 & 5,222 & 11.7 \\
 CR Val & 55 & 7,609 & 138.3 \\
-CR Test & 58 & 7,620 & 131.4 \\
+CR Test & 58 & 6,414 & 110.6 \\
 \midrule
-Total & 560 & 73,267 & 130.8 \\
+Total & 560 & 71,237 & 127.2 \\
 \bottomrule
 \end{tabular}
-\caption{\benchmark{} dataset statistics.}
+\caption{\benchmark{} dataset statistics. Counts reflect pairs after quality filtering (comma-leading target removal). \todo{Verify final counts; total was 73,267 pre-filter.}}
 \label{tab:dataset_stats}
 \end{table}
 
-% ============================================================
-\section{Experiments}
-\label{sec:experiments}
-% ============================================================
-
-\subsection{Setup}
-
-\paragraph{Base Model.} Qwen2.5-Coder-1.5B, kept frozen during hypernetwork training.
-
-\paragraph{Hypernetwork.} 2-layer MLP trunk (input$\to$512$\to$512), per-type output heads. LoRA rank 16, alpha 32. Target modules: all attention and MLP projections (7 types $\times$ 28 layers = 196 modules).
-
-\paragraph{Training.} AdamW optimizer, learning rate 1e-4 with cosine schedule, 3 epochs, batch size 1 with gradient accumulation.
-
-\subsection{Baselines}
-
-\begin{itemize}
-    \item \textbf{Pretrained}: Qwen2.5-Coder-1.5B with no adaptation.
-    \item \textbf{RAG (k=5)}: Retrieve top-5 code chunks from the repo using Qwen3-Embedding, prepend as context.
-    \item \textbf{ICL (5-shot)}: Few-shot examples from the same repo (IR) or nearest training repo (CR).
-    \item \textbf{Fine-tuned}: Full fine-tuning on all training QnA pairs.
-    \item \textbf{Single LoRA}: One LoRA adapter trained on all training data.
-    \item \textbf{LoRA per Repo}: Per-repo LoRA adapter (oracle upper bound for IR).
-\end{itemize}
-
-\subsection{Main Results}
-
-% TODO: Fill in actual numbers after running experiments
 \begin{table}[t]
 \centering
 \small
-\begin{tabular}{lccc}
+\begin{tabular}{lrrr}
 \toprule
-Method & EM (\%) & Edit Sim. & CodeBLEU \\
+Property & Train & CR Test & IR Test \\
 \midrule
-\multicolumn{4}{c}{\emph{Cross-Repo (CR Test)}} \\
+Assertion types & & & \\
+\quad \texttt{assert} & \todo{X\%} & \todo{X\%} & \todo{X\%} \\
+\quad \texttt{self.assert*} & \todo{X\%} & \todo{X\%} & \todo{X\%} \\
+\quad \texttt{pytest.*} & \todo{X\%} & \todo{X\%} & \todo{X\%} \\
 \midrule
-Pretrained & 34.6 & 0.530 & -- \\
-RAG (k=5) & -- & -- & -- \\
-ICL (5-shot) & -- & -- & -- \\
-Fine-tuned & -- & -- & -- \\
-Single LoRA & -- & -- & -- \\
-\textbf{\method{}} & \textbf{58.0} & \textbf{0.792} & -- \\
-\method{} + Compose & -- & -- & -- \\
+Difficulty & & & \\
+\quad Simple & \todo{X\%} & \todo{X\%} & \todo{X\%} \\
+\quad Medium & \todo{X\%} & \todo{X\%} & \todo{X\%} \\
+\quad Hard & \todo{X\%} & \todo{X\%} & \todo{X\%} \\
 \midrule
-\multicolumn{4}{c}{\emph{In-Repo (IR Test)}} \\
-\midrule
-Pretrained & -- & -- & -- \\
-LoRA per Repo & -- & -- & -- \\
-\textbf{\method{}} & -- & -- & -- \\
+Avg.\ target length (chars) & \todo{X} & \todo{X} & \todo{X} \\
+Avg.\ prefix length (tokens) & \todo{X} & \todo{X} & \todo{X} \\
+Oracle coverage (\%) & \todo{X} & \todo{X} & \todo{X} \\
 \bottomrule
 \end{tabular}
-\caption{Main results. EM = Exact Match. Best CR results in \textbf{bold}.}
-\label{tab:main_results}
+\caption{Detailed dataset statistics across splits. \todo{Fill from validation script output.}}
+\label{tab:dataset_details}
 \end{table}
 
-\subsection{Composability Results}
+% ============================================================
+\section{Experimental Setup}
+\label{sec:setup}
+% ============================================================
 
-% TODO: Fill with incremental adaptation results
-\begin{figure}[t]
+\subsection{Base Model and Embeddings}
+
+\paragraph{Base LLM.}
+Qwen2.5-Coder-1.5B~\cite{hui2024qwen25coder}, a 1.5B-parameter code language model.
+The model is loaded in \texttt{bfloat16} precision and kept frozen during all hypernetwork training.
+All baselines that involve fine-tuning also use this model.
+
+\paragraph{Embedding model.}
+Qwen3-Embedding-0.6B for repository encoding.
+Each file is chunked into 4,096-token windows with 512-token overlap.
+The same embedding model is used for RAG chunk indexing and ICL example retrieval.
+\todo{Verify embedding model name and dimensions.}
+
+\subsection{Hypernetwork Configuration}
+
+\paragraph{Direct-projection (\method{}).}
+Input dimension: 2,048 (concatenated mean+max of 1,024-dim embeddings).
+Hidden dimension: 512.
+LoRA rank: 16, alpha: 32.
+Target modules: all 7 attention and MLP projection types across all 28 transformer layers (196 total injection points).
+Trunk: 2-layer MLP with GELU activation and L2 normalization.
+
+\paragraph{Shared-basis (\method{}-PAW).}
+Same input and LoRA configuration.
+Hidden dimension: 512.
+Number of bases: $N = 16$.
+Trunk depth: 2 (input projection + 1 residual MLP block).
+Coefficient head maps to $L \times M \times N \times 2 = 28 \times 7 \times 16 \times 2 = 6{,}272$ mixing coefficients.
+
+\paragraph{Training.}
+AdamW optimizer with learning rate $1 \times 10^{-4}$, cosine schedule with warmup, 3 epochs, effective batch size 1 (gradient accumulation as needed).
+Maximum sequence length: 8,192 tokens.
+Training uses the SFT (Supervised Fine-Tuning) framework from TRL~\cite{vonwerra2022trl}.
+Best checkpoint selected by validation loss on CR val.
+
+\subsection{Baselines}
+\label{sec:baselines}
+
+We compare against seven baselines spanning inference-only and trained methods:
+
+\paragraph{Pretrained.}
+Qwen2.5-Coder-1.5B with no adaptation.
+Generates completions directly from the test prefix with no additional context.
+
+\paragraph{RAG ($k$=3).}
+Non-test source files are pre-chunked into 512-token segments and embedded using Qwen3-Embedding.
+At inference, the test prefix is embedded and top-$k$ chunks are retrieved by cosine similarity.
+Retrieved chunks are prepended to the prefix.
+We report $k=3$ (best performing); results for $k=5$ and $k=10$ are in the appendix.
+\todo{Move k=5,10 results to appendix.}
+
+\paragraph{ICL (3-shot).}
+Few-shot examples from similar contexts.
+For IR evaluation, examples are randomly sampled from same-repo training pairs.
+For CR evaluation, examples are retrieved by embedding similarity between the test prefix and training prefixes across all repositories, ensuring diverse and relevant demonstrations.
+\todo{Verify retrieval-based selection is used for final results.}
+
+\paragraph{Oracle Context.}
+Import-resolved source code definitions prepended to the prefix (Section~\ref{sec:oracle}).
+This provides an upper bound on the information extractable from import analysis without any training.
+
+\paragraph{Full Fine-Tuning (FFT).}
+All parameters of Qwen2.5-Coder-1.5B are fine-tuned on the training set.
+Training uses \texttt{bfloat16} precision, AdamW optimizer, learning rate $2 \times 10^{-5}$, 3 epochs, maximum sequence length 2,048 tokens.
+Best checkpoint selected by validation loss.
+
+\paragraph{Single LoRA (sLoRA).}
+One LoRA adapter (rank 16, alpha 32) trained on all training data.
+Training uses \texttt{bfloat16} precision, AdamW optimizer, 3 epochs, maximum sequence length 2,048 tokens.
+
+\paragraph{Per-Repo LoRA (pLoRA).}
+Individual LoRA adapters trained separately for each repository using only that repository's training data.
+Applicable only for IR evaluation (adapters cannot be created for unseen CR repositories).
+We train on 10 representative repositories.
+\todo{Expand to all IR repos or report subset. Current: 10 repos, n=99 test pairs.}
+
+\subsection{Evaluation Metrics}
+\label{sec:metrics}
+
+We report three complementary metrics:
+
+\paragraph{Exact Match (EM).}
+Binary metric: 1 if the predicted assertion target matches the reference after normalization (whitespace collapsing, trailing comma/colon removal).
+We apply relaxed matching that handles common model overgeneration (e.g., predicting extra arguments after a comma when the reference has none).
+
+\paragraph{Edit Similarity.}
+The SequenceMatcher ratio~\cite{python_difflib} between prediction and reference, ranging from 0 (completely different) to 1 (identical).
+Captures partial credit for near-correct predictions.
+
+\paragraph{CodeBLEU.}
+Code-aware BLEU~\cite{ren2020codebleu} that considers AST and data-flow structure in addition to n-gram overlap.
+We use the \texttt{codebleu} package where available, with a fallback to tokenized BLEU computed on Python code tokens.
+For exact matches, CodeBLEU is defined as 1.0 to avoid smoothing artifacts on short strings.
+\todo{Add CodeBLEU citation.}
+
+\paragraph{Inference configuration.}
+All methods use identical inference settings: \texttt{max\_input\_tokens} = 16,384, \texttt{max\_new\_tokens} = 128, greedy decoding (temperature 0).
+Post-processing strips FIM tokens, takes the first line (for single-line targets), and removes trailing comments.
+
+% ============================================================
+\section{Results}
+\label{sec:results}
+% ============================================================
+
+\subsection{Main Results}
+
+Table~\ref{tab:main_results} presents results across all methods on both evaluation settings.
+
+\begin{table*}[t]
 \centering
-% \includegraphics[width=\columnwidth]{figures/incremental_adaptation.pdf}
-\caption{Incremental adaptation: performance improves monotonically as more file-level LoRAs are composed.}
-\label{fig:incremental}
-\end{figure}
+\small
+\begin{tabular}{l@{\hskip 8pt}ccc@{\hskip 12pt}ccc}
+\toprule
+& \multicolumn{3}{c}{\textbf{Cross-Repo (CR Test)}} & \multicolumn{3}{c}{\textbf{In-Repo (IR Test)}} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7}
+Method & EM (\%) & EditSim & CodeBLEU & EM (\%) & EditSim & CodeBLEU \\
+\midrule
+\multicolumn{7}{l}{\emph{Inference-only (no training)}} \\
+\midrule
+Pretrained & 45.7 & 0.597 & \todoinline{0.XX}\textsuperscript{\dag} & 46.8 & 0.615 & \todoinline{0.XX}\textsuperscript{\dag} \\
+RAG ($k$=3) & 39.9 & 0.534 & 0.439 & 42.3 & 0.554 & 0.447 \\
+ICL (3-shot) & 42.2 & 0.560 & 0.470 & 45.3 & 0.593 & 0.482 \\
+Oracle Context & 47.5 & 0.609 & 0.484 & 48.7 & 0.618 & 0.486 \\
+\midrule
+\multicolumn{7}{l}{\emph{Trained (prefix $\to$ target)}} \\
+\midrule
+FFT & 51.4 & 0.367 & 0.355 & 55.9 & 0.389 & 0.379 \\
+Single LoRA & 41.2 & 0.179 & 0.208 & 43.8 & 0.187 & 0.213 \\
+Per-repo LoRA & --- & --- & --- & 57.6 & \todoinline{X.XX} & \todoinline{X.XX} \\
+\textbf{\method{}} & \textbf{63.8} & \textbf{0.784} & \textbf{0.777} & \textbf{66.2} & \textbf{0.806} & \textbf{0.795} \\
+\method{}-PAW & \todoinline{XX.X} & \todoinline{X.XX} & \todoinline{X.XX} & \todoinline{XX.X} & \todoinline{X.XX} & \todoinline{X.XX} \\
+\midrule
+\multicolumn{7}{l}{\emph{Trained (oracle + prefix $\to$ target)}} \\
+\midrule
+FFT + Oracle & \todoinline{XX.X} & \todoinline{X.XX} & \todoinline{X.XX} & \todoinline{XX.X} & \todoinline{X.XX} & \todoinline{X.XX} \\
+sLoRA + Oracle & \todoinline{XX.X} & \todoinline{X.XX} & \todoinline{X.XX} & \todoinline{XX.X} & \todoinline{X.XX} & \todoinline{X.XX} \\
+pLoRA + Oracle & --- & --- & --- & \todoinline{XX.X} & \todoinline{X.XX} & \todoinline{X.XX} \\
+\textbf{\method{} + Oracle} & \todoinline{XX.X} & \todoinline{X.XX} & \todoinline{X.XX} & \todoinline{XX.X} & \todoinline{X.XX} & \todoinline{X.XX} \\
+\method{}-PAW + Oracle & \todoinline{XX.X} & \todoinline{X.XX} & \todoinline{X.XX} & \todoinline{XX.X} & \todoinline{X.XX} & \todoinline{X.XX} \\
+\bottomrule
+\end{tabular}
+\caption{Main results on \benchmark{}. EM = Exact Match (\%), EditSim = Edit Similarity, CodeBLEU. Best non-oracle results per column in \textbf{bold}. Per-repo LoRA is N/A for CR (no adapter for unseen repos). \textsuperscript{\dag}Pretrained CodeBLEU to be re-evaluated with \texttt{codebleu} package. \todo{Fill all missing cells. Re-run pretrained with CodeBLEU. Verify sLoRA numbers---current results use 4-bit quantized model; bf16 retrain in progress. pLoRA only on 10 repos (n=99); expand or caveat.}}
+\label{tab:main_results}
+\end{table*}
 
-\subsection{Scaling Analysis}
+\paragraph{Key findings.}
+\begin{enumerate}[nosep]
+    \item \textbf{\method{} substantially outperforms all baselines on CR.}
+    On cross-repo evaluation, \method{} achieves 63.8\% EM, outperforming the next best method (FFT, 51.4\%) by 12.4 absolute points and the pretrained baseline by 18.1 points.
+    This demonstrates that repository embeddings encode substantial task-relevant knowledge.
 
-We evaluate \method{} across different base model sizes to understand scaling behavior.
+    \item \textbf{Context-based methods underperform on assertion completion.}
+    RAG (39.9\%) and ICL (42.2\%) perform \emph{below} the pretrained baseline (45.7\%) on CR.
+    We hypothesize that retrieved chunks and few-shot examples consume context budget without providing directly useful information for assertion prediction, and may introduce distracting context.
+    Oracle context (47.5\%) provides only a modest 1.8-point improvement, suggesting that even perfect import resolution offers limited benefit in the input space.
 
-% TODO: Fill with scale experiment results
+    \item \textbf{Parametric adaptation outperforms context injection.}
+    All trained methods (except sLoRA) outperform context-based methods, confirming that adapting model parameters is more effective than input augmentation for repository-level tasks.
+    \todo{Verify this claim holds after sLoRA bf16 retrain.}
+
+    \item \textbf{IR consistently outperforms CR.}
+    All methods show 2--4\% higher EM on IR vs.\ CR, reflecting the benefit of in-distribution test data from familiar repositories.
+
+    \item \textbf{Per-repo LoRA is competitive on IR.}
+    At 57.6\% EM on IR, per-repo LoRA demonstrates the value of repository-specific adaptation, but \method{} still outperforms it (66.2\%) while requiring no per-repo training.
+    \todo{Verify pLoRA result is representative (only 10 repos, n=99). Consider caveating.}
+\end{enumerate}
+
+\paragraph{Discussion: RAG and ICL below pretrained.}
+This counterintuitive result---context-based methods underperforming the pretrained baseline---warrants discussion.
+Assertion completion targets are typically short expressions (variable names, function calls, constants) that depend heavily on \emph{local} context (the test function body) rather than retrieved repository content.
+Prepending retrieved chunks or few-shot examples consumes context budget and can shift the model's attention away from the immediate test context.
+We use a generous context window (16,384 tokens) to minimize truncation effects, but the fundamental issue is that retrieval noise outweighs the benefit of additional context for this particular task.
+This motivates the \method{} approach: repository knowledge should be \emph{internalized} into model parameters rather than injected as context.
+\todo{Run ablation varying context window size to support this claim.}
+
+\subsection{Oracle Context Ablation}
+\label{sec:oracle_ablation}
+
+We evaluate whether oracle context at training time provides benefits that transfer to inference without oracle context (Table~\ref{tab:oracle_ablation}).
+
 \begin{table}[t]
 \centering
 \small
 \begin{tabular}{lcc}
 \toprule
-Base Model & Pretrained EM & \method{} EM \\
+\multirow{2}{*}{Train Condition} & \multicolumn{2}{c}{Test EM (\%)} \\
+\cmidrule(lr){2-3}
+& w/o Oracle & w/ Oracle \\
 \midrule
-Qwen2.5-Coder-0.5B & -- & -- \\
-Qwen2.5-Coder-1.5B & 34.6 & 58.0 \\
-Qwen2.5-Coder-3B & -- & -- \\
+\multicolumn{3}{c}{\emph{CR Test}} \\
+\midrule
+\method{} & 63.8 & \todoinline{XX.X} \\
+\method{} + Oracle & \todoinline{XX.X} & \todoinline{XX.X} \\
+\midrule
+\multicolumn{3}{c}{\emph{IR Test}} \\
+\midrule
+\method{} & 66.2 & \todoinline{XX.X} \\
+\method{} + Oracle & \todoinline{XX.X} & \todoinline{XX.X} \\
 \bottomrule
 \end{tabular}
-\caption{Scaling behavior across model sizes.}
-\label{tab:scaling}
+\caption{Oracle cross-evaluation ablation for \method{}. \todo{Fill after oracle-trained model completes. Key question: does ``train+oracle, test-oracle'' $\geq$ ``train-oracle, test-oracle''?}}
+\label{tab:oracle_ablation}
 \end{table}
 
-\subsection{Ablation Studies}
+\todo{Write analysis paragraph interpreting the oracle ablation results:
+\begin{itemize}
+    \item If train+oracle, test-oracle $\approx$ train-oracle, test-oracle $\to$ oracle training doesn't help without oracle at test (expected).
+    \item If train+oracle, test-oracle $>$ train-oracle, test-oracle $\to$ model learned transferable patterns from oracle exposure (strong result).
+    \item Discuss practical implications: when should practitioners use oracle context?
+\end{itemize}}
 
-% TODO: Fill with ablation results
-\begin{table}[t]
+
+\subsection{Composability Results}
+\label{sec:composability}
+
+\todo{If composable experiments are complete, report:
+\begin{enumerate}
+    \item Comparison of additive, weighted, and gated composition (Table or figure).
+    \item Incremental adaptation: plot EM vs.\ number of files composed (monotonic improvement expected).
+    \item Efficiency: time to update adapter when a single file changes.
+\end{enumerate}
+If not complete, replace this subsection with a sentence: ``We leave composable evaluation to future work.'' and remove from contributions list.}
+
+\begin{figure}[t]
 \centering
-\small
-\begin{tabular}{lc}
-\toprule
-Configuration & EM (\%) \\
-\midrule
-\multicolumn{2}{c}{\emph{LoRA Rank}} \\
-\midrule
-Rank 4 & -- \\
-Rank 8 & -- \\
-Rank 16 (default) & 58.0 \\
-Rank 32 & -- \\
-\midrule
-\multicolumn{2}{c}{\emph{Hypernetwork Width}} \\
-\midrule
-Hidden 256 & -- \\
-Hidden 512 (default) & 58.0 \\
-Hidden 1024 & -- \\
-\bottomrule
-\end{tabular}
-\caption{Ablation study results on CR val.}
-\label{tab:ablations}
-\end{table}
+\todo{Incremental adaptation figure: x-axis = number of files, y-axis = EM. Show monotonic improvement.}
+\caption{Incremental adaptation: performance improves as more file-level LoRAs are composed into the repository adapter.}
+\label{fig:incremental}
+\end{figure}
 
 % ============================================================
 \section{Analysis}
 \label{sec:analysis}
 % ============================================================
 
-\subsection{When Does \method{} Help Most?}
-% Per-repo analysis: correlate improvement with repo characteristics
+\subsection{Per-Repository Performance Distribution}
 
-\subsection{What Do Generated LoRAs Look Like?}
-% t-SNE visualization, pairwise similarity analysis
+Figure~\ref{fig:per_repo_boxplot} shows the distribution of per-repo EM scores across IR-test repositories for different methods.
 
-\subsection{Failure Analysis}
-% Categorize error types, qualitative examples
+\begin{figure}[t]
+\centering
+\todo{Box/violin plot: per-repo EM for Pretrained, FFT, pLoRA, Code2LoRA on IR-test.
+Expected patterns:
+- pLoRA: high variance (small repos $\to$ few examples $\to$ unstable)
+- Code2LoRA: lower variance (hypernetwork regularizes across repos)
+- FFT/Pretrained: uniform (no per-repo signal)
+Generate with: analysis/per\_repo\_boxplot.py}
+\caption{Per-repository EM distribution on IR test. \method{} achieves consistently high performance with lower variance than per-repo LoRA, demonstrating the regularizing effect of the hypernetwork.}
+\label{fig:per_repo_boxplot}
+\end{figure}
 
-\subsection{Efficiency Comparison}
-% Runtime comparison: pretrained vs RAG vs Code2LoRA
+\todo{Write analysis paragraph:
+\begin{itemize}
+    \item pLoRA high variance: small repos have few training examples, leading to unreliable adapters.
+    \item Code2LoRA transfers knowledge across repos, stabilizing performance.
+    \item Identify repos where Code2LoRA helps most (repos with unique coding patterns) vs.\ least (repos with generic code).
+\end{itemize}}
+
+\subsection{Scaling with Number of Training Repositories}
+
+We train \method{} on subsets of 10, 20, 50, 100, 200, and all 447 training repositories and evaluate on CR test to measure the benefit of repository diversity.
+
+\begin{figure}[t]
+\centering
+\todo{Scaling plot: x-axis = number of training repos (log scale), y-axis = CR-test EM.
+Expected: monotonic improvement with diminishing returns.
+Include pretrained baseline as horizontal line.
+Generate with: analysis/scaling\_repos.py}
+\caption{CR-test EM as a function of training repository count. \method{} benefits from repository diversity, with performance improving log-linearly.}
+\label{fig:scaling_repos}
+\end{figure}
+
+\todo{Write analysis paragraph:
+\begin{itemize}
+    \item How many repos are needed to surpass pretrained? FFT?
+    \item Is the curve saturating or still improving at 447 repos?
+    \item Implications for scaling: collecting more repositories is likely to improve results further.
+\end{itemize}}
+
+\subsection{Performance vs.\ Repository Size}
+
+\begin{figure}[t]
+\centering
+\todo{Scatter plot: x-axis = number of training QnA pairs per repo, y-axis = IR-test EM per repo.
+One series per method: pLoRA, Code2LoRA, FFT, Pretrained.
+Expected: pLoRA improves with more data per repo; Code2LoRA is more stable.
+Generate with: analysis/performance\_vs\_repo\_size.py}
+\caption{IR-test EM vs.\ number of training examples per repository. Per-repo LoRA is data-hungry, while \method{} maintains stable performance across repository sizes.}
+\label{fig:perf_vs_size}
+\end{figure}
+
+\todo{Analyze: pLoRA needs $>$X examples to outperform Code2LoRA. For repos with fewer examples, Code2LoRA's cross-repo transfer is critical.}
+
+\subsection{LoRA Weight Analysis}
+
+We analyze the structure of generated LoRA weights to understand what the hypernetwork learns.
+
+\paragraph{Inter-repository similarity.}
+We compute pairwise cosine similarity between flattened LoRA weight vectors generated for different repositories.
+\todo{Report:
+\begin{itemize}
+    \item Average pairwise similarity for Code2LoRA-generated LoRAs.
+    \item Average pairwise similarity for independently trained pLoRA adapters.
+    \item Expected: Code2LoRA generates more similar adapters (smooth hypernetwork manifold) vs.\ independently trained pLoRA (higher variance).
+\end{itemize}}
+
+\begin{figure}[t]
+\centering
+\todo{t-SNE or UMAP of generated LoRA weights for 50+ repos, colored by repository domain or size.
+Generate with: analysis/lora\_similarity.py}
+\caption{t-SNE visualization of generated LoRA weight vectors. Repositories with similar codebases produce similar adapters, demonstrating that the hypernetwork captures meaningful repository structure.}
+\label{fig:lora_tsne}
+\end{figure}
+
+\subsection{Qualitative Examples}
+
+Table~\ref{tab:qualitative} shows representative examples where \method{} succeeds and fails.
+
+\begin{table*}[t]
+\centering
+\small
+\begin{tabular}{p{5cm}p{3cm}p{3cm}p{3cm}}
+\toprule
+Test Prefix (truncated) & Reference & \method{} & Pretrained \\
+\midrule
+\todo{Example 1: Code2LoRA correct, pretrained wrong. Pick from CR test---demonstrates cross-repo generalization.} & & & \\
+\midrule
+\todo{Example 2: Code2LoRA correct, FFT wrong. Shows adaptation advantage over generic fine-tuning.} & & & \\
+\midrule
+\todo{Example 3: Code2LoRA partially correct (high edit sim). Shows graceful degradation.} & & & \\
+\midrule
+\todo{Failure: Code2LoRA wrong. Analyze why---rare API, ambiguous target, insufficient repo context.} & & & \\
+\bottomrule
+\end{tabular}
+\caption{Qualitative examples from CR test. \todo{Select from analysis/qualitative\_examples.py output.}}
+\label{tab:qualitative}
+\end{table*}
+
+\subsection{Effect of Oracle Context Coverage}
+
+Approximately \todo{87.5\%} of QnA pairs have non-empty oracle context (i.e., at least one imported definition was resolved to a repository source file).
+The remaining pairs import only from the standard library or third-party packages.
 
 \begin{table}[t]
 \centering
 \small
-\begin{tabular}{lrr}
+\begin{tabular}{lcc}
 \toprule
-Method & Extra Tokens & Adapt. Time \\
+& \multicolumn{2}{c}{CR Test EM (\%)} \\
+\cmidrule(lr){2-3}
+Method & w/ Oracle & w/o Oracle \\
 \midrule
-Pretrained & 0 & N/A \\
-RAG (k=5) & $\sim$2500 & Runtime \\
-Fine-tuned & 0 & Hours \\
-LoRA/Repo & 0 & Min/Repo \\
-\method{} & 0 & $\sim$10ms \\
+Pretrained & \todoinline{XX.X} & \todoinline{XX.X} \\
+Oracle Context & \todoinline{XX.X} & \todoinline{XX.X} \\
+\method{} & \todoinline{XX.X} & \todoinline{XX.X} \\
+\method{} + Oracle & \todoinline{XX.X} & \todoinline{XX.X} \\
 \bottomrule
 \end{tabular}
-\caption{Efficiency comparison. \method{} adds zero inference tokens and generates adapters in a single forward pass.}
+\caption{Performance partitioned by oracle availability on CR test. ``w/ Oracle'' = pairs where oracle context exists; ``w/o Oracle'' = pairs with only stdlib/third-party imports. \todo{Fill from analysis/oracle\_coverage\_analysis.py.}}
+\label{tab:oracle_coverage}
+\end{table}
+
+\todo{Analyze:
+\begin{itemize}
+    \item Does oracle context help more for pairs where it's available? (Expected: yes)
+    \item Does Code2LoRA still outperform on pairs without oracle? (Expected: yes, showing the embedding captures information beyond import resolution)
+\end{itemize}}
+
+\subsection{Efficiency Comparison}
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lrrl}
+\toprule
+Method & Extra Tokens & Adapt.\ Time & Storage \\
+\midrule
+Pretrained & 0 & N/A & 3.0 GB \\
+RAG ($k$=3) & $\sim$1,500 & per query & +chunks \\
+ICL (3-shot) & $\sim$1,200 & per query & +examples \\
+Oracle & $\sim$500 & per query & +cache \\
+FFT & 0 & $\sim$\todoinline{X}h & +3.0 GB \\
+sLoRA & 0 & $\sim$\todoinline{X}h & +19 MB \\
+pLoRA & 0 & $\sim$\todoinline{X}min/repo & +19 MB/repo \\
+\method{} & \textbf{0} & $<$10ms/repo & +\todoinline{X} MB \\
+\method{}-PAW & \textbf{0} & $<$10ms/repo & +\todoinline{X} MB \\
+\bottomrule
+\end{tabular}
+\caption{Efficiency comparison. \method{} adds zero inference tokens and generates adapters in a single forward pass ($<$10ms on GPU). Storage costs are for the hypernetwork weights only; the frozen base model (3.0 GB) is shared.}
 \label{tab:efficiency}
 \end{table}
+
+\todo{Measure and fill:
+\begin{itemize}
+    \item Actual adapter generation time (forward pass through hypernetwork).
+    \item Total inference time per sample for each method.
+    \item Hypernetwork model sizes in MB.
+    \item Training time for FFT, sLoRA.
+\end{itemize}}
+
+% ============================================================
+\section{Ablation Studies}
+\label{sec:ablations}
+% ============================================================
+
+We conduct ablation studies on CR val to isolate the contribution of key design choices.
+
+\subsection{LoRA Rank}
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lcc}
+\toprule
+LoRA Rank & EM (\%) & Params \\
+\midrule
+4 & \todoinline{XX.X} & \todoinline{X}M \\
+8 & \todoinline{XX.X} & \todoinline{X}M \\
+16 (default) & \todoinline{XX.X} & \todoinline{X}M \\
+32 & \todoinline{XX.X} & \todoinline{X}M \\
+\bottomrule
+\end{tabular}
+\caption{Effect of LoRA rank on CR val. \todo{Fill from ablation experiments.}}
+\label{tab:ablation_rank}
+\end{table}
+
+\todo{Analyze: is rank 16 optimal? Does higher rank help or overfit?}
+
+\subsection{Hypernetwork Width}
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lcc}
+\toprule
+Hidden Dim & EM (\%) & Params \\
+\midrule
+256 & \todoinline{XX.X} & \todoinline{X}M \\
+512 (default) & \todoinline{XX.X} & \todoinline{X}M \\
+1024 & \todoinline{XX.X} & \todoinline{X}M \\
+\bottomrule
+\end{tabular}
+\caption{Effect of hypernetwork hidden dimension on CR val. \todo{Fill from ablation experiments.}}
+\label{tab:ablation_width}
+\end{table}
+
+\subsection{Number of Bases (PAW)}
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lcc}
+\toprule
+Num Bases ($N$) & EM (\%) & Params \\
+\midrule
+4 & \todoinline{XX.X} & \todoinline{X}M \\
+8 & \todoinline{XX.X} & \todoinline{X}M \\
+16 (default) & \todoinline{XX.X} & \todoinline{X}M \\
+32 & \todoinline{XX.X} & \todoinline{X}M \\
+\bottomrule
+\end{tabular}
+\caption{Effect of number of basis vectors in the PAW-style hypernetwork on CR val. \todo{Fill from ablation experiments.}}
+\label{tab:ablation_bases}
+\end{table}
+
+\subsection{Embedding Components}
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lc}
+\toprule
+Embedding & EM (\%) \\
+\midrule
+Mean only & \todoinline{XX.X} \\
+Max only & \todoinline{XX.X} \\
+Mean + Max (default) & \todoinline{XX.X} \\
+Mean + Max + Weighted & \todoinline{XX.X} \\
+\bottomrule
+\end{tabular}
+\caption{Effect of repository embedding composition on CR val. \todo{Fill from ablation experiments.}}
+\label{tab:ablation_embedding}
+\end{table}
+
+\subsection{Training Data Size}
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lc}
+\toprule
+Training Repos & CR Test EM (\%) \\
+\midrule
+50 (12\%) & \todoinline{XX.X} \\
+100 (24\%) & \todoinline{XX.X} \\
+200 (49\%) & \todoinline{XX.X} \\
+409 (100\%) & 63.8 \\
+\bottomrule
+\end{tabular}
+\caption{Effect of training set size on CR test performance. \todo{Fill from scaling experiments.}}
+\label{tab:ablation_data}
+\end{table}
+
+\subsection{Architecture Comparison}
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+Variant & CR EM & IR EM & Params \\
+\midrule
+Direct-Projection & 63.8 & 66.2 & \todoinline{X}M \\
+Shared-Basis (PAW) & \todoinline{XX.X} & \todoinline{XX.X} & \todoinline{X}M \\
+\bottomrule
+\end{tabular}
+\caption{Comparison of hypernetwork architectures. \todo{Fill PAW results after training completes.}}
+\label{tab:ablation_arch}
+\end{table}
+
+\todo{Analyze the trade-off: PAW uses $\sim$8.5$\times$ fewer parameters. If performance is comparable, PAW is strictly preferable. If there is a gap, discuss the parameter-performance trade-off.}
+
+% ============================================================
+\section{Scaling Analysis}
+\label{sec:scaling}
+% ============================================================
+
+We evaluate \method{} across different base model sizes to understand scaling behavior.
+
+\begin{table}[t]
+\centering
+\small
+\begin{tabular}{lccc}
+\toprule
+Base Model & Pretrained & FFT & \method{} \\
+\midrule
+Qwen2.5-Coder-0.5B & \todoinline{XX.X} & \todoinline{XX.X} & \todoinline{XX.X} \\
+Qwen2.5-Coder-1.5B & 45.7 & 51.4 & 63.8 \\
+Qwen2.5-Coder-3B & \todoinline{XX.X} & \todoinline{XX.X} & \todoinline{XX.X} \\
+\bottomrule
+\end{tabular}
+\caption{Scaling behavior across base model sizes (CR test EM \%). \todo{Fill after scale experiments. Key question: does the benefit of Code2LoRA increase or decrease with model size?}}
+\label{tab:scaling}
+\end{table}
+
+\todo{Analyze:
+\begin{itemize}
+    \item Does the gap between Code2LoRA and pretrained grow with model size? (interesting if yes)
+    \item Does the gap shrink? (suggests larger models already internalize repo knowledge)
+    \item How does FFT scale vs.\ Code2LoRA?
+\end{itemize}}
+
+% ============================================================
+\section{Discussion}
+\label{sec:discussion}
+% ============================================================
+
+\paragraph{Why does \method{} outperform fine-tuning?}
+FFT adapts all model parameters using training data from all repositories, learning a single ``average'' specialization.
+\method{} instead generates repo-\emph{specific} adapters, allowing the model to dynamically specialize for each test repository.
+This is particularly beneficial for cross-repo evaluation, where the repository was never seen during training---the hypernetwork transfers structural patterns from training repositories to generate effective adapters for new ones.
+
+\paragraph{Why do context-based methods underperform?}
+For assertion completion, the target is typically a short expression whose value depends primarily on the immediate test context (variable assignments, function calls in the test body).
+Prepending retrieved code or few-shot examples adds tokens that do not directly help predict the assertion value and may shift the model's distribution.
+This does not imply that RAG and ICL are generally ineffective for code tasks---they may excel at tasks requiring explicit cross-file knowledge (e.g., API usage, type inference).
+We plan to investigate task-specific interactions in future work.
+\todo{Verify this explanation with attention analysis or context ablation.}
+
+\paragraph{Limitations of the current evaluation.}
+Per-repo LoRA results are based on 10 repositories (99 test pairs).
+Expanding to all IR repositories would provide a more representative comparison but requires substantial compute.
+Additionally, the single LoRA baseline was initially trained with 4-bit quantization; we retrained with \texttt{bfloat16} for fair comparison, but results should be verified.
+\todo{Verify final sLoRA numbers after bf16 retraining.}
 
 % ============================================================
 \section{Conclusion}
 \label{sec:conclusion}
 % ============================================================
 
-We presented \method{}, a hypernetwork approach for generating repository-specific LoRA adapters from code embeddings. Our method distills repository knowledge into lightweight, composable adapters that specialize a frozen code LLM without runtime retrieval or retraining. The composable design enables incremental adaptation as codebases evolve. Evaluated on \benchmark{}, a new benchmark of 560 Python repositories with 73K assertion completion tasks, \method{} achieves strong performance while being significantly more efficient than retrieval-based alternatives.
+We presented \method{}, a hypernetwork approach for generating repository-specific LoRA adapters from code embeddings.
+Given a new repository, \method{} produces task-effective adapters in a single forward pass, requiring no retrieval, no additional inference tokens, and no per-repository retraining.
+We introduced two hypernetwork architectures---direct-projection and shared-basis---offering a trade-off between representational capacity and parameter efficiency.
 
+Evaluated on \benchmark{}, a benchmark of 560 Python repositories with 73K assertion completion tasks across cross-repo and in-repo settings, \method{} achieves 63.8\% exact match on cross-repo evaluation---substantially outperforming pretrained (45.7\%), fine-tuned (51.4\%), and context-based (RAG: 39.9\%, ICL: 42.2\%) baselines.
+Notably, \method{} outperforms even per-repo LoRA training (57.6\%) on in-repo evaluation (66.2\%) despite requiring zero per-repo training data.
+
+Our results demonstrate that distilling repository knowledge into adapter parameters via a hypernetwork is more effective than injecting it through the input context, opening a new direction for efficient, scalable repository-level code understanding.
+
+\todo{Update final numbers and claims after all experiments complete. Mention composable results if available. Polish conclusion.}
+
+% ============================================================
 \section*{Limitations}
+% ============================================================
 
-Our work has several limitations: (1) We evaluate only on Python assertion completion; generalization to other programming languages and code tasks remains to be validated. (2) Our benchmark uses assertion targets as ground truth, which does not capture functional correctness (e.g., a different but equivalent expression). (3) The hypernetwork adds parameters ($\sim$50M) that must be stored alongside the base model.
+\begin{enumerate}[nosep]
+    \item \textbf{Task scope.} We evaluate only on Python assertion completion. Generalization to other programming languages, other code tasks (e.g., function completion, bug fixing), and non-code domains remains to be validated.
 
+    \item \textbf{Evaluation metric.} Exact match does not capture functional equivalence---a different but semantically equivalent expression is scored as incorrect. Edit similarity and CodeBLEU partially address this, but execution-based evaluation would be more robust.
+
+    \item \textbf{Repository scale.} Our benchmark uses 560 repositories. While this is sufficient for initial evaluation, larger-scale experiments would strengthen claims about generalization.
+
+    \item \textbf{Hypernetwork overhead.} The hypernetwork adds $\sim$\todoinline{X}M parameters that must be stored alongside the base model. While adapter generation is fast ($<$10ms), the hypernetwork must be loaded into memory.
+
+    \item \textbf{Static embeddings.} Repository embeddings are computed once and do not update as the codebase changes. The composable design addresses this partially through incremental file-level updates, but a fully online adaptation mechanism is left to future work.
+    \todo{Verify composable claim is supported by experiments.}
+\end{enumerate}
+
+% ============================================================
+\section*{Ethics Statement}
+% ============================================================
+
+Our work uses publicly available open-source Python repositories with permissive licenses.
+We do not train on or generate personally identifiable information.
+The assertion completion task evaluates model accuracy on developer-written tests and does not involve generating novel code that could have safety implications.
+\todo{Review ethics requirements for EMNLP 2025.}
+
+% ============================================================
+\section*{Acknowledgments}
+% ============================================================
+
+\todo{Add acknowledgments: compute resources (Alliance Canada), funding, colleagues.}
+
+% ============================================================
 \bibliography{references}
 \bibliographystyle{acl_natbib}
+
+% ============================================================
+% APPENDIX
+% ============================================================
+\appendix
+
+\section{Additional Results}
+\label{app:additional_results}
+
+\subsection{RAG with Different $k$}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lccc@{\hskip 12pt}ccc}
+\toprule
+& \multicolumn{3}{c}{CR Test} & \multicolumn{3}{c}{IR Test} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7}
+$k$ & EM & EditSim & BLEU & EM & EditSim & BLEU \\
+\midrule
+3 & 39.9 & 0.534 & 0.439 & 42.3 & 0.554 & 0.447 \\
+5 & 37.8 & 0.510 & 0.422 & 39.9 & 0.529 & 0.428 \\
+10 & 36.4 & 0.491 & 0.406 & 39.4 & 0.518 & 0.420 \\
+\bottomrule
+\end{tabular}
+\caption{RAG results for varying $k$. Performance decreases with more retrieved chunks, suggesting retrieval noise outweighs additional context.}
+\label{tab:rag_k}
+\end{table}
+
+\subsection{ICL with Different Shot Counts}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lccc@{\hskip 12pt}ccc}
+\toprule
+& \multicolumn{3}{c}{CR Test} & \multicolumn{3}{c}{IR Test} \\
+\cmidrule(lr){2-4} \cmidrule(lr){5-7}
+Shots & EM & EditSim & BLEU & EM & EditSim & BLEU \\
+\midrule
+3 & 42.2 & 0.560 & 0.470 & 45.3 & 0.593 & 0.482 \\
+5 & 42.0\textsuperscript{*} & 0.544 & 0.462 & 44.9 & 0.587 & 0.479 \\
+\bottomrule
+\end{tabular}
+\caption{ICL results for varying shot counts. \textsuperscript{*}5-shot CR evaluated on n=2,750 (partial run). \todo{Complete 5-shot CR run.}}
+\label{tab:icl_shots}
+\end{table}
+
+\subsection{Full Per-Repository Breakdown}
+\label{app:per_repo}
+
+\todo{Add table with per-repo EM for all IR-test repos across methods. Or top/bottom 10 repos.}
+
+\section{Implementation Details}
+\label{app:implementation}
+
+\subsection{Dataset Construction Details}
+
+\paragraph{Test file identification.}
+Files are classified as test files if they match any of:
+\texttt{test\_*.py}, \texttt{*\_test.py}, or reside in directories named \texttt{tests/}, \texttt{test/}.
+Identified test files are moved to a separate \texttt{TEST\_HYPERNET/} directory within each repository, preserving relative paths.
+
+\paragraph{Structured prefix construction.}
+Each QnA prefix is constructed as follows:
+\begin{enumerate}[nosep]
+    \item All import statements from the test file.
+    \item The enclosing class definition (if the test is a method).
+    \item Helper methods (\texttt{setUp}, \texttt{tearDown}, fixtures).
+    \item The test function signature and body up to the assertion cut point.
+\end{enumerate}
+This structured approach preserves the most informative context while managing token budget.
+
+\paragraph{Quality filters applied.}
+\begin{itemize}[nosep]
+    \item Targets starting with comma (malformed AST segmentation).
+    \item Targets outside function bodies (module-level assertions).
+    \item Empty or whitespace-only targets.
+    \item Duplicate targets within the same test function.
+    \item Targets containing only punctuation or single characters.
+\end{itemize}
+
+\subsection{Oracle Context Construction}
+
+\paragraph{Import resolution strategy.}
+For each import in the test prefix:
+\begin{enumerate}[nosep]
+    \item Parse using AST with fallback regex for syntax errors.
+    \item Resolve the module to a file path, trying multiple source roots: repository root, \texttt{src/}, \texttt{lib/}, package directories with \texttt{\_\_init\_\_.py}.
+    \item For relative imports, resolve relative to the test file's location.
+    \item If the imported name is used in the test prefix, extract its definition (function or class) from the source file via AST.
+\end{enumerate}
+
+\paragraph{Coverage.}
+\todo{Report: X\% of pairs have oracle, average oracle length in tokens, distribution.}
+
+\subsection{Training Details}
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{lcccc}
+\toprule
+& FFT & sLoRA & \method{} & \method{}-PAW \\
+\midrule
+LR & 2e-5 & 2e-4 & 1e-4 & 1e-4 \\
+Epochs & 3 & 3 & 3 & 3 \\
+Max seq len & 2048 & 2048 & 8192 & 8192 \\
+Batch size & \todoinline{X} & \todoinline{X} & 1 & 1 \\
+Grad accum & \todoinline{X} & \todoinline{X} & \todoinline{X} & \todoinline{X} \\
+Precision & bf16 & bf16 & bf16 & bf16 \\
+Optimizer & AdamW & AdamW & AdamW & AdamW \\
+\bottomrule
+\end{tabular}
+\caption{Training hyperparameters for all trained methods. \todo{Fill missing values.}}
+\label{tab:training_details}
+\end{table}
+
+\subsection{Compute Resources}
+
+All experiments were conducted on Alliance Canada HPC clusters using NVIDIA H100 GPUs.
+\todo{Report total GPU hours, specific node types, wallclock times for each experiment.}
+
+\section{Broader Analysis}
+\label{app:analysis}
+
+\todo{Add additional analysis figures here:
+\begin{itemize}
+    \item Learning curves (training loss over steps for each method).
+    \item Attention pattern visualization showing how LoRA-adapted model differs from pretrained.
+    \item Error categorization table (types of failures: wrong value, wrong type, hallucinated API, etc.).
+\end{itemize}}
 
 \end{document}

@@ -273,9 +273,11 @@ def apply_lora_hooks(
         def _make_hook(_A, _B, _scaling):
             def hook(mod, inp, out):
                 x = inp[0]
+                _A_cast = _A.to(dtype=x.dtype)
+                _B_cast = _B.to(dtype=x.dtype)
                 delta = torch.bmm(
-                    torch.bmm(x, _A.transpose(1, 2)),
-                    _B.transpose(1, 2),
+                    torch.bmm(x, _A_cast.transpose(1, 2)),
+                    _B_cast.transpose(1, 2),
                 ) * _scaling
                 return out + delta
             return hook
@@ -410,21 +412,31 @@ class HypernetPawTrainer(SFTTrainer):
         ctx = inputs["ctx"].to(device=model.device, dtype=torch.float32)
         ctx = F.normalize(ctx, p=2, dim=-1)
         lora_params = self._run_mapper(ctx)
-        hooks = apply_lora_hooks(self._target_modules_dict, lora_params, self.lora_mapper.lora_scaling)
-        try:
-            out = model(
-                input_ids=inputs["input_ids"].to(model.device),
-                attention_mask=inputs["attention_mask"].to(model.device),
-                labels=inputs["labels"].to(model.device),
-            )
-        finally:
-            remove_lora_hooks(hooks)
+
+        # Hooks must survive through backward for gradient-checkpointing
+        # recomputation. Store on self so training_step can clean up after
+        # backward() completes.
+        self._active_hooks = apply_lora_hooks(
+            self._target_modules_dict, lora_params, self.lora_mapper.lora_scaling,
+        )
+
+        out = model(
+            input_ids=inputs["input_ids"].to(model.device),
+            attention_mask=inputs["attention_mask"].to(model.device),
+            labels=inputs["labels"].to(model.device),
+        )
         loss = out["loss"] if isinstance(out, dict) else out[0]
 
         if _should_debug_print():
             print(f"[step={_DEBUG_STEP['global']}] loss={loss.item():.4f} repo={inputs.get('repo_name','?')!r}", flush=True)
 
         return (loss, out) if return_outputs else loss
+
+    def _remove_active_hooks(self):
+        hooks = getattr(self, "_active_hooks", None)
+        if hooks:
+            remove_lora_hooks(hooks)
+            self._active_hooks = None
 
     def training_step(self, model, inputs, num_items_in_batch=None):
         do_dbg = _should_debug_print()
@@ -435,6 +447,8 @@ class HypernetPawTrainer(SFTTrainer):
         if self.args.n_gpu > 1:
             loss = loss.mean()
         self.accelerator.backward(loss)
+        # Safe to remove hooks now — backward (including checkpoint recomputation) is done
+        self._remove_active_hooks()
 
         if self.args.max_grad_norm is not None and self.args.max_grad_norm > 0:
             total_norm = torch.nn.utils.clip_grad_norm_(self.lora_mapper.parameters(), self.args.max_grad_norm)
@@ -443,6 +457,12 @@ class HypernetPawTrainer(SFTTrainer):
 
         _DEBUG_STEP["global"] += 1
         return loss.detach() / self.args.gradient_accumulation_steps
+
+    def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys=None):
+        """Override to clean up hooks after each eval forward (no backward)."""
+        result = super().prediction_step(model, inputs, prediction_loss_only, ignore_keys)
+        self._remove_active_hooks()
+        return result
 
     def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix="eval"):
         was_training = self.lora_mapper.training

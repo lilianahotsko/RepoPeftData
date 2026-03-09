@@ -19,7 +19,6 @@ python baselines/finetuned/train_finetuned.py \
     --output-dir "$CKPT_DIR/FFT_ORACLE" \
     --use-oracle \
     --max-seq-length 4096 \
-    --epochs 3 --batch-size 4 --grad-accum 8 --lr 2e-5 \
-    --no-wandb
+    --epochs 3 --batch-size 4 --grad-accum 8 --lr 2e-5
 
 echo "Done: $(date)"

@@ -19,7 +19,6 @@ python baselines/single_lora/train_single_lora.py \
     --output-dir "$CKPT_DIR/SINGLE_LORA_ORACLE" \
     --use-oracle \
     --max-seq-length 4096 \
-    --epochs 3 --batch-size 4 --grad-accum 4 --lr 2e-4 \
-    --no-wandb
+    --epochs 3 --batch-size 4 --grad-accum 4 --lr 2e-4
 
 echo "Done: $(date)"

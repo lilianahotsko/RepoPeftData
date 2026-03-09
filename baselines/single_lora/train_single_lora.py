@@ -139,11 +139,11 @@ def main():
     ap.add_argument("--model-name", type=str, default=MODEL_NAME)
     ap.add_argument("--epochs", type=int, default=3)
     ap.add_argument("--batch-size", type=int, default=4)
-    ap.add_argument("--grad-accum", type=int, default=4)
+    ap.add_argument("--grad-accum", type=int, default=8)
     ap.add_argument("--lr", type=float, default=2e-4)
     ap.add_argument("--max-seq-length", type=int, default=2048)
-    ap.add_argument("--rank", type=int, default=16)
-    ap.add_argument("--lora-alpha", type=int, default=32)
+    ap.add_argument("--rank", type=int, default=64)
+    ap.add_argument("--lora-alpha", type=int, default=128)
     ap.add_argument("--val-split", type=str, default="cr_val")
     ap.add_argument("--use-oracle", action="store_true",
                     help="Prepend oracle context to prefixes")
@@ -203,7 +203,7 @@ def main():
     lora_config = LoraConfig(
         r=args.rank,
         lora_alpha=args.lora_alpha,
-        lora_dropout=0.05,
+        lora_dropout=0.0,
         bias="none",
         task_type="CAUSAL_LM",
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
@@ -230,11 +230,11 @@ def main():
         logging_steps=20,
         eval_strategy="epoch" if val_ds else "no",
         save_strategy="epoch",
-        save_total_limit=1,
+        save_total_limit=3,
         load_best_model_at_end=True if val_ds else False,
         metric_for_best_model="eval_loss" if val_ds else None,
         optim="adamw_torch",
-        max_grad_norm=0.3,
+        max_grad_norm=1.0,
         seed=args.seed,
         report_to="none" if args.no_wandb else "wandb",
         remove_unused_columns=False,

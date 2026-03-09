@@ -18,7 +18,6 @@ python baselines/finetuned/train_finetuned.py \
     --splits-dir "$SPLITS_DIR" \
     --output-dir "$CKPT_DIR/FFT" \
     --max-seq-length 2048 \
-    --epochs 3 --batch-size 4 --grad-accum 8 --lr 2e-5 \
-    --no-wandb
+    --epochs 3 --batch-size 4 --grad-accum 8 --lr 2e-5
 
 echo "Done: $(date)"

@@ -21,7 +21,6 @@ python baselines/lora_per_repo/run_all_repos.py \
     --eval-split ir_test \
     --use-oracle \
     --max-seq-length 4096 \
-    --epochs 3 \
-    --no-wandb
+    --epochs 3
 
 echo "Done: $(date)"

@@ -28,11 +28,10 @@ from datasets import Dataset
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
-    BitsAndBytesConfig,
     DataCollatorForLanguageModeling,
     TrainingArguments,
 )
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+from peft import LoraConfig, get_peft_model
 from trl import SFTTrainer
 
 
@@ -351,27 +350,17 @@ def main():
         train_dataset, val_dataset = create_train_val_split(examples, val_ratio=args.val_ratio)
         print(f"Train: {len(train_dataset)}, Val: {len(val_dataset)}")
 
-    # Model & tokenizer (same as lora_trainer.py)
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16,
-        bnb_4bit_use_double_quant=True,
-    )
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
     tokenizer.pad_token = tokenizer.eos_token
-    # Left truncation: keep target (right), drop prefix (left) when over max_length
-    # Left padding: pad on left so last token is real content (causal LM)
     tokenizer.truncation_side = "left"
     tokenizer.padding_side = "left"
 
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_NAME,
-        quantization_config=bnb_config,
+        torch_dtype=torch.bfloat16,
         device_map="auto",
         trust_remote_code=True,
     )
-    model = prepare_model_for_kbit_training(model)
 
     lora_config = LoraConfig(
         r=16,
@@ -408,7 +397,7 @@ def main():
         save_total_limit=1,
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
-        optim="paged_adamw_8bit",
+        optim="adamw_torch",
         max_grad_norm=0.3,
         report_to="none" if args.no_wandb else "wandb",
         remove_unused_columns=False,
