@@ -76,7 +76,7 @@ def main():
     ap.add_argument("--device", type=str, default="cuda")
     args = ap.parse_args()
 
-    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+    from transformers import AutoModelForCausalLM, AutoTokenizer
     from peft import PeftModel
 
     splits_dir = Path(args.splits_dir).expanduser().resolve()
@@ -87,19 +87,17 @@ def main():
         raise ValueError(f"No items in {args.split}.json at {splits_dir}")
 
     adapter_path = Path(args.adapter).expanduser().resolve()
-    print(f"Loading model + single LoRA adapter from {adapter_path}")
+    print(f"Loading model + single LoRA adapter from {adapter_path} (bf16, no quantization)")
 
     tok = AutoTokenizer.from_pretrained(str(adapter_path), trust_remote_code=True)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
 
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True, bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16, bnb_4bit_use_double_quant=True,
-    )
     base_model = AutoModelForCausalLM.from_pretrained(
-        args.model_name, quantization_config=bnb_config,
-        device_map="auto", trust_remote_code=True,
+        args.model_name,
+        trust_remote_code=True,
+        torch_dtype=torch.bfloat16,
+        device_map={"": args.device},
     )
     model = PeftModel.from_pretrained(base_model, str(adapter_path))
     model.eval()

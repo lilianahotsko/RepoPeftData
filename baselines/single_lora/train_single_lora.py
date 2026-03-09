@@ -23,11 +23,10 @@ from datasets import Dataset
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
-    BitsAndBytesConfig,
     DataCollatorForLanguageModeling,
     TrainingArguments,
 )
-from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+from peft import LoraConfig, get_peft_model
 from trl import SFTTrainer
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
@@ -188,23 +187,18 @@ def main():
     train_ds = Dataset.from_list(train_pairs)
     val_ds = Dataset.from_list(val_pairs) if val_pairs else None
 
-    print(f"Loading model: {args.model_name}")
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16,
-        bnb_4bit_use_double_quant=True,
-    )
+    print(f"Loading model: {args.model_name} (bf16, no quantization)")
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.truncation_side = "left"
     tokenizer.padding_side = "left"
 
     model = AutoModelForCausalLM.from_pretrained(
-        args.model_name, quantization_config=bnb_config,
-        device_map="auto", trust_remote_code=True,
+        args.model_name,
+        trust_remote_code=True,
+        torch_dtype=torch.bfloat16,
+        device_map="auto",
     )
-    model = prepare_model_for_kbit_training(model)
 
     lora_config = LoraConfig(
         r=args.rank,
@@ -239,7 +233,7 @@ def main():
         save_total_limit=1,
         load_best_model_at_end=True if val_ds else False,
         metric_for_best_model="eval_loss" if val_ds else None,
-        optim="paged_adamw_8bit",
+        optim="adamw_torch",
         max_grad_norm=0.3,
         seed=args.seed,
         report_to="none" if args.no_wandb else "wandb",
