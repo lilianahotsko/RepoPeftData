@@ -18,7 +18,8 @@ python baselines/single_lora/train_single_lora.py \
     --splits-dir "$SPLITS_DIR" \
     --output-dir "$CKPT_DIR/SINGLE_LORA_ORACLE" \
     --use-oracle \
+    --rank 64 --lora-alpha 128 \
     --max-seq-length 4096 \
-    --epochs 3 --batch-size 4 --grad-accum 4 --lr 2e-4
+    --epochs 3 --batch-size 4 --grad-accum 8 --lr 2e-4
 
 echo "Done: $(date)"

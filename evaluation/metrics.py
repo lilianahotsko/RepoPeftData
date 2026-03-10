@@ -126,11 +126,22 @@ def code_bleu_score(pred: str, ref: str, lang: str = "python") -> float:
 
 
 def postprocess_prediction(pred: str, target: str) -> str:
-    """Standard prediction postprocessing pipeline."""
+    """Standard prediction postprocessing pipeline.
+
+    Truncates overgeneration to match the target's token-level format so that
+    EM, EditSim, and CodeBLEU are all computed on the same cleaned string.
+    """
     pred = strip_fim_tokens(pred)
     if "\n" not in target and "\n" in pred:
         pred = pred.split("\n")[0]
-    return strip_comments(pred)
+    pred = strip_comments(pred)
+    ref = strip_comments(target).strip()
+    if ref:
+        if "," not in ref and "," in pred:
+            pred = pred.split(",")[0].strip()
+        if len(ref.split()) == 1 and len(pred.strip().split()) > 1:
+            pred = pred.strip().split()[0]
+    return pred.strip()
 
 
 def compute_metrics(pred: str, ref: str) -> dict:

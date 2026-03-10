@@ -31,6 +31,8 @@ def main():
     ap.add_argument("--splits-dir", type=str, default=default_dataset)
     ap.add_argument("--output-base", type=str, default=default_output)
     ap.add_argument("--limit-repos", type=int, default=None)
+    ap.add_argument("--repo-offset", type=int, default=0,
+                    help="Skip first N repos (for chunked parallel execution)")
     ap.add_argument("--eval-only", action="store_true", help="Skip training, only evaluate")
     ap.add_argument("--eval-split", type=str, default="ir_test")
     ap.add_argument("--epochs", type=int, default=3)
@@ -50,6 +52,8 @@ def main():
         raise FileNotFoundError(f"train.json not found at {splits_dir}")
     data = json.loads(train_path.read_text(encoding="utf-8"))
     repo_names = sorted(data.get("repositories", {}).keys())
+    if args.repo_offset:
+        repo_names = repo_names[args.repo_offset:]
     if args.limit_repos:
         repo_names = repo_names[:args.limit_repos]
 

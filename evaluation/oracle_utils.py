@@ -11,11 +11,11 @@ from pathlib import Path
 from typing import Optional
 
 
-def get_default_oracle_cache_dir() -> str:
-    return os.path.join(
-        os.environ.get("SCRATCH", os.path.expanduser("~/scratch")),
-        "ORACLE_CONTEXT_CACHE",
-    )
+def get_default_oracle_cache_dir(version: str = "v1") -> str:
+    scratch = os.environ.get("SCRATCH", os.path.expanduser("~/scratch"))
+    if version == "v2":
+        return os.path.join(scratch, "ORACLE_CONTEXT_CACHE_V2")
+    return os.path.join(scratch, "ORACLE_CONTEXT_CACHE")
 
 
 def load_oracle_cache(cache_dir: Path, repo_name: str) -> dict:

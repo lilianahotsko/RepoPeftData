@@ -1,9 +1,9 @@
 #!/bin/bash
 
 #SBATCH --job-name=analyze_preprocessed_data
-#SBATCH --output=gated_hypernetwork.out
-#SBATCH --error=gated_hypernetwork.err
-#SBATCH --time=10:00:00
+#SBATCH --output=visualization.out
+#SBATCH --error=visualization.err
+#SBATCH --time=1:00:00
 #SBATCH --gres=gpu:h100:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=80G
@@ -37,7 +37,9 @@ export PIP_CACHE_DIR=$SCRATCH/.cache/pip
 #     --output $SCRATCH/BASELINES/qwen_full.json \
 #     --split cr_test
 
-python baselines/rag/build_indices.py
+# python baselines/rag/build_indices.py
+python visualize_pairs_context.py --split cr_test --limit 2 -o context_report_cr.html
+
 
 # cd /home/lhotsko/RepoPeftData
 # python hypernetwork/hypernetwork_sampled_test.py \

@@ -227,6 +227,10 @@ def main():
             results_path.parent.mkdir(parents=True, exist_ok=True)
             results_path.write_text(json.dumps(_res, indent=2), encoding="utf-8")
 
+    exact_match_pct = 100.0 * em_count / max(1, n)
+    code_bleu_avg = bleu_sum / max(1, n)
+    edit_sim_avg = edit_sum / max(1, n)
+
     print("\n" + "=" * 60)
     print(f"Oracle Context Baseline on {args.split}")
     print("=" * 60)
