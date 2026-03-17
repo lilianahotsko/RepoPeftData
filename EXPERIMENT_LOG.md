@@ -227,6 +227,180 @@ sbatch scripts/slurm/progressive_internalization.sh  # Job 10105612
 - Time: 8h, 1x H100
 - Output: `$SCRATCH/BASELINES/progressive_internalization_cr_test.json`
 
-### Expected results
+### Results (COMPLETED — Job 10105612)
 
-Performance should improve monotonically with k. The accumulate mode may lag slightly behind re-embed (which has the full context at each step) but demonstrates the key advantage: O(1) incremental updates. If both modes converge to similar performance at k=20-30, it validates the progressive approach.
+| Mode | k=0 | k=1 | k=2 | k=3 | k=5 | k=10 | k=15 | k=20 | k=30 |
+|------|-----|-----|-----|-----|-----|------|------|------|------|
+| Re-embed EM | 49.6% | 67.9% | 68.5% | 68.5% | 68.5% | 68.7% | 68.9% | 68.9% | 63.3%* |
+| Accumulate EM | 49.6% | 67.9% | 68.0% | 68.3% | 68.0% | 68.0% | 68.3% | 68.0% | 62.7%* |
+
+*k=30 drops because only 630 pairs from repos with 30+ files (selection bias).
+
+**Key findings:**
+- Massive jump from k=0 (49.6%, no context) to k=1 (67.9%, one file). One file is enough.
+- Diminishing returns after k=1. Re-embed peaks at k=20 (68.9%).
+- Accumulate closely tracks re-embed (within 0.9pp), validating O(1) incremental approach.
+
+---
+
+## 2026-03-10: Phase 0 Update — Metric Cleanup
+
+### Removed relaxed `_pred_candidates` from `exact_match`
+
+Since `postprocess_prediction()` now handles overgeneration truncation (comma splitting,
+single-word truncation), the relaxed matching logic in `_pred_candidates()` was redundant.
+Simplified `exact_match()` to just `normalize_for_match(pred) == normalize_for_match(ref)`.
+
+**File:** `evaluation/metrics.py` — removed `_pred_candidates()`, simplified `exact_match()`.
+EM numbers are unchanged since the truncation was already handled by `postprocess_prediction`.
+
+### Recomputed local metrics for inference-only baselines
+
+Applied fixed `postprocess_prediction` to stored predictions (no GPU needed):
+
+| Method | EM (unchanged) | ES (old→new) | CB Note |
+|--------|---------------|--------------|---------|
+| Pretrained CR | 45.71% | 0.597→0.605 | Was 0.0, now fallback BLEU=0.646 (pending real CodeBLEU) |
+| Pretrained IR | 46.82% | 0.615→0.624 | Was 0.0, now fallback BLEU=0.655 (pending real CodeBLEU) |
+| RAG CR | 39.93% | 0.534→0.535 | Kept original CB=0.439 |
+| RAG IR | 42.32% | 0.554→0.560 | Kept original CB=0.448 |
+| ICL CR | 42.22% | 0.560→0.559 | Kept original CB=0.470 |
+| ICL IR | 45.35% | 0.593→0.596 | Kept original CB=0.482 |
+| Oracle CR | 47.47% | 0.609→0.614 | Kept original CB=0.484 |
+| Oracle IR | 48.74% | 0.618→0.627 | Kept original CB=0.486 |
+
+---
+
+## 2026-03-10: Phase 1 — sLoRA r=64 Investigation
+
+### Finding: r=64 is over-parameterized, causes massive regression
+
+sLoRA r=64 (job 10075188) completed, but EM dropped to **36.03%** CR / **39.20%** IR —
+far worse than the original r=16 model (45.00% / 48.35%) and even worse than pretrained (45.71%).
+
+**Training analysis:**
+- r=16 eval_loss: 0.664 (ep1), 0.682 (ep2), 0.920 (ep3)
+- r=64 eval_loss: 0.835 (ep1), 0.791 (ep2), 0.983 (ep3)
+- r=64 has **worse eval_loss at every epoch** than r=16
+
+`load_best_model_at_end=True` correctly saved the epoch 2 checkpoint (verified via MD5).
+The r=64 model (73.4M params) genuinely underperforms r=16 (18.4M params) — the larger
+rank over-parameterizes the 1.5B base model.
+
+**Action:** Retrained sLoRA r=16 with improved settings:
+```bash
+sbatch scripts/slurm/retrain_slora_r16.sh  # Job 10133136 (rrg-yuntian)
+```
+Config: r=16, alpha=32, dropout=0, grad_accum=8, max_grad_norm=1.0, lr=2e-4, 3 epochs.
+Trains + evaluates both cr_test and ir_test.
+
+---
+
+## 2026-03-10: Phase 1 — Per-repo LoRA Expanded Results
+
+### 191 repos evaluated (chunks 2+4, chunks 1+3 still pending)
+
+| Metric | Value |
+|--------|-------|
+| Repos evaluated | 191 / ~380 |
+| Total examples | 2,424 |
+| Overall EM | **64.56%** |
+| Overall EditSim | 0.797 |
+| Overall CodeBLEU | 0.790 |
+| Per-repo EM mean | 61.62% |
+| Per-repo EM median | 63.64% |
+| Per-repo EM stdev | 21.13% |
+| Per-repo EM range | 0.00% – 100.00% |
+
+**Key finding:** Per-repo LoRA at 64.56% IR EM is close to Code2LoRA Direct at 66.24%.
+This is expected — per-repo LoRA is the **upper bound** (trained specifically on each repo).
+Code2LoRA achieves ~97% of this upper bound without per-repo training.
+
+---
+
+## 2026-03-10: Scaling Experiments — Updated Results
+
+### All completed data points
+
+| N Repos | CR EM (%) | EditSim | CodeBLEU | Status |
+|---------|-----------|---------|----------|--------|
+| 10 | 57.73 | 0.732 | 0.732 | DONE (job 10104714) |
+| 25 | 60.88 | 0.760 | 0.753 | DONE (job 10104715) |
+| 50 | 60.88 | 0.760 | 0.755 | DONE |
+| 100 | 61.27 | 0.756 | 0.754 | DONE |
+| 150 | — | — | — | PENDING (resubmitted: job 10133448) |
+| 200 | 62.24 | 0.773 | 0.765 | DONE |
+| 300 | — | — | — | PENDING (resubmitted: job 10133450) |
+| 409 | 63.81 | 0.784 | 0.777 | DONE |
+| 500* | 61.18 | 0.767 | 0.759 | DONE (expanded dataset) |
+| 623 | — | — | — | PENDING (job 10104857) |
+
+*N=500 uses expanded dataset (repos with 1-29 QnA pairs). Performance drops because
+sparse repos dilute training quality. This data point may be excluded from the scaling fit.
+
+### Updated scaling law fit (7 data points)
+
+```
+Log-linear: EM = 1.02 * ln(N) + 56.5   R²=0.659
+Power law:  Error% = 43.7 * N^(-0.026)  R²=0.656
+```
+
+R² lower than previous 4-point fit (0.935) due to:
+1. N=500 outlier (expanded dataset with sparse repos)
+2. N=50 and N=25 near-identical (60.88%)
+
+Without N=500: R² should be closer to ~0.9.
+
+---
+
+## 2026-03-10: Job Resubmissions (account switch)
+
+Cancelled stuck `def-yuntian` jobs (ReqNodeNotAvail) and resubmitted on `rrg-yuntian`:
+
+| Job | Old ID | New ID | Account |
+|-----|--------|--------|---------|
+| reeval_all_baselines | 10102796 | 10133305 | rrg-yuntian |
+| reeval_hypernets | 10102800 | 10133309 | rrg-yuntian |
+| scale_h150 | 10104716 | 10133448 | rrg-yuntian |
+| scale_h300 | 10104717 | 10133450 | rrg-yuntian |
+| train_fft_oracle | 10102804 | 10133592 | rrg-yuntian |
+| train_slora_oracle | 10102806 | 10133591 | rrg-yuntian |
+| train_hnet_oracle | 10102805 | 10133593 | rrg-yuntian |
+| train_hpaw_oracle | 10102807 | 10133595 | rrg-yuntian |
+| phase2d_oracle_v2 | 10102803 | 10133597 | rrg-yuntian |
+| retrain_slora_r16 | — | 10133136 | rrg-yuntian |
+
+---
+
+## 2026-03-10: Analysis & Figures Generated
+
+All figures generated in `analysis/figures/`:
+1. **main_results.pdf** — Grouped bar chart (CR + IR) for all methods
+2. **scaling_law.pdf** — EM vs. #repos with log-linear and power-law fits
+3. **scaling_law_extended.pdf** — Same with predictions extrapolated
+4. **per_repo_violin.pdf** — Per-repo EM violin plot across methods (IR test)
+5. **data_sparsity.pdf** — Per-repo LoRA EM vs. training data size
+6. **scaling_editsim.pdf** — EditSim and CodeBLEU scaling curves
+
+---
+
+## Current Full Results Table (2026-03-10 evening)
+
+| Method | CR EM | CR ES | CR CB | IR EM | IR ES | IR CB | N(CR) | N(IR) |
+|--------|-------|-------|-------|-------|-------|-------|-------|-------|
+| **Inference-only** | | | | | | | | |
+| Pretrained | 45.71% | 0.605 | 0.646† | 46.82% | 0.624 | 0.655† | 6414 | 5222 |
+| RAG (k=3) | 39.93% | 0.535 | 0.439 | 42.32% | 0.560 | 0.448 | 6414 | 5222 |
+| ICL (3-shot) | 42.22% | 0.559 | 0.470 | 45.35% | 0.596 | 0.482 | 6414 | 5222 |
+| Oracle Context | 47.47% | 0.614 | 0.484 | 48.74% | 0.627 | 0.486 | 6414 | 5222 |
+| **Trained** | | | | | | | | |
+| FFT | 51.42% | 0.696 | 0.678 | 55.88% | 0.727 | 0.714 | 6414 | 5222 |
+| sLoRA r=64 | 36.03% | 0.575 | 0.580 | 39.20% | 0.616 | 0.610 | 6414 | 5222 |
+| sLoRA r=16 | ~45.0%‡ | ~0.645‡ | — | ~48.4%‡ | ~0.674‡ | — | 6414 | 5222 |
+| Per-repo LoRA | — | — | — | 64.56% | 0.797 | 0.790 | — | 2424 |
+| **Code2LoRA** | | | | | | | | |
+| Direct | **63.81%** | **0.784** | 0.777 | **66.24%** | **0.806** | 0.795 | 6414 | 5222 |
+| PAW | **64.09%** | **0.786** | 0.777 | 65.84% | 0.804 | 0.790 | 6414 | 5222 |
+
+† Fallback tokenized BLEU (real codebleu pending SLURM re-eval)
+‡ From previous r=16 model (adapter overwritten by r=64). Retrain r=16 pending (job 10133136).

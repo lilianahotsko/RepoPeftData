@@ -34,25 +34,27 @@
 target format. FFT/sLoRA EditSim was drastically underreported (0.37→0.70, 0.27→0.64).
 See `EXPERIMENT_LOG.md` for details.
 
-| Method | CR Test EM | CR EditSim | IR Test EM | IR EditSim | Status |
-|--------|-----------|------------|-----------|------------|--------|
-| **Inference-only** | | | | | |
-| Pretrained | 45.71% | 0.605 | 46.82% | 0.624 | Re-eval pending (CodeBLEU) |
-| RAG (k=3) | 39.93% | 0.535 | 42.32% | 0.560 | Re-eval pending (CodeBLEU) |
-| ICL (3-shot) | 42.22% | 0.559 | 45.35% | 0.596 | Re-eval pending (CodeBLEU) |
-| Oracle Context | 47.47% | 0.614 | 48.74% | 0.627 | Re-eval pending (CodeBLEU) |
-| **Trained** | | | | | |
-| FFT | 51.42% | 0.696 | 55.88% | 0.727 | Re-eval pending (CodeBLEU) |
-| Single LoRA (r=16) | 45.00% | 0.645 | 48.35% | 0.674 | r=64 eval pending |
-| Single LoRA (r=64) | — | — | — | — | Eval pending (job 10102798) |
-| Per-repo LoRA | N/A | N/A | 57.58% (10 repos) | 0.685 | Full run: jobs 10102795-10102801 |
-| Code2LoRA (Direct) | **63.81%** | **0.784** | **66.24%** | **0.806** | Re-eval pending (CodeBLEU) |
-| Code2LoRA (PAW) | **64.09%** | **0.785** | 65.84% | 0.805 | Re-eval pending (CodeBLEU) |
-| **+Oracle (training submitted)** | | | | | |
-| FFT + Oracle | — | — | — | — | Training: job 10102804 |
-| Single LoRA + Oracle | — | — | — | — | Training: job 10102806 |
-| Code2LoRA + Oracle | — | — | — | — | Training: job 10102805 |
-| Code2LoRA PAW + Oracle | — | — | — | — | Training: job 10102807 |
+| Method | CR EM | CR ES | CR CB | IR EM | IR ES | IR CB | Status |
+|--------|-------|-------|-------|-------|-------|-------|--------|
+| **Inference-only** | | | | | | | |
+| Pretrained | 45.71% | 0.605 | 0.646† | 46.82% | 0.624 | 0.655† | Pending real CB |
+| RAG (k=3) | 39.93% | 0.535 | 0.439 | 42.32% | 0.560 | 0.448 | Done |
+| ICL (3-shot) | 42.22% | 0.559 | 0.470 | 45.35% | 0.596 | 0.482 | Done |
+| Oracle Context | 47.47% | 0.614 | 0.484 | 48.74% | 0.627 | 0.486 | Done |
+| **Trained** | | | | | | | |
+| FFT | 51.42% | 0.696 | 0.678 | 55.88% | 0.727 | 0.714 | Done |
+| sLoRA r=16 | ~45.0%‡ | ~0.645‡ | — | ~48.4%‡ | ~0.674‡ | — | Retrain: 10133136 |
+| sLoRA r=64 | 36.03% | 0.575 | 0.580 | 39.20% | 0.616 | 0.610 | **Over-param** |
+| Per-repo LoRA | — | — | — | 64.56% | 0.797 | 0.790 | 191/~380 repos |
+| Code2LoRA Direct | **63.81%** | **0.784** | **0.777** | **66.24%** | **0.806** | **0.795** | Done |
+| Code2LoRA PAW | **64.09%** | **0.786** | **0.777** | 65.84% | 0.804 | 0.790 | Done |
+| **+Oracle** | | | | | | | |
+| FFT + Oracle | — | — | — | — | — | — | Job 10133592 |
+| sLoRA + Oracle | — | — | — | — | — | — | Job 10133591 |
+| Code2LoRA + Oracle | — | — | — | — | — | — | Job 10133593 |
+| Code2LoRA PAW + Oracle | — | — | — | — | — | — | Job 10133595 |
+
+† Fallback BLEU, ‡ Previous r=16 model (adapter overwritten)
 
 ### Architecture Comparison (Paper Table)
 
@@ -63,16 +65,20 @@ See `EXPERIMENT_LOG.md` for details.
 
 PAW achieves comparable performance with ~8.5x fewer mapper parameters.
 
-### Scaling Experiments (Paper Table 13 — in progress)
+### Scaling Experiments (Paper Table 13)
 
-| Training Repos | CR Test EM (%) |
-|----------------|----------------|
-| 50 (12%) | *training* |
-| 100 (24%) | *training* |
-| 200 (49%) | *training* |
-| 409 (100%) | 63.81% |
+| Training Repos | CR Test EM (%) | EditSim | CodeBLEU |
+|----------------|----------------|---------|----------|
+| 10 (2%) | 57.73% | 0.732 | 0.732 |
+| 25 (6%) | 60.88% | 0.760 | 0.753 |
+| 50 (12%) | 60.88% | 0.760 | 0.755 |
+| 100 (24%) | 61.27% | 0.756 | 0.754 |
+| 200 (49%) | 62.24% | 0.773 | 0.765 |
+| 409 (100%) | 63.81% | 0.784 | 0.777 |
+| 500 (expanded)* | 61.18% | 0.767 | 0.759 |
 
-Scripts: `scripts/slurm/scale_hypernet_{50,100,200}.sh`
+*500 repos includes sparse repos (1-29 pairs), performance drops.
+Pending: 150, 300, 623 repos.
 
 ## Key Issues & Next Steps
 

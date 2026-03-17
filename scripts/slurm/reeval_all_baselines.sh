@@ -6,7 +6,7 @@
 #SBATCH --gres=gpu:h100:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=80G
-#SBATCH --account=def-yuntian
+#SBATCH --account=rrg-yuntian
 
 # Re-evaluate ALL inference-only baselines with fixed postprocess_prediction.
 # Trained methods are re-evaluated via their own scripts.

@@ -35,20 +35,13 @@ def normalize_for_match(s: str) -> str:
     return " ".join(s.split())
 
 
-def _pred_candidates(pred: str, ref: str) -> list[str]:
-    """Return candidate pred strings to try for relaxed match."""
-    candidates = [normalize_for_match(pred)]
-    if "," not in ref and "," in pred:
-        candidates.append(normalize_for_match(pred.split(",")[0]))
-    if len(ref.split()) == 1 and " " in pred:
-        candidates.append(normalize_for_match(pred.split()[0]))
-    return candidates
-
-
 def exact_match(pred: str, ref: str) -> bool:
-    """Exact match with relaxed postprocessing for common model overgeneration."""
-    norm_ref = normalize_for_match(ref)
-    return any(c == norm_ref for c in _pred_candidates(pred, ref))
+    """Exact match after normalization.
+
+    Callers are expected to pass through postprocess_prediction() first,
+    which handles overgeneration truncation (comma, whitespace, newline).
+    """
+    return normalize_for_match(pred) == normalize_for_match(ref)
 
 
 def edit_similarity(pred: str, ref: str) -> float:

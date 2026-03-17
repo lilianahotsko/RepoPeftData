@@ -6,7 +6,7 @@
 #SBATCH --gres=gpu:h100:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=80G
-#SBATCH --account=def-yuntian
+#SBATCH --account=rrg-yuntian
 
 source scripts/slurm/common.sh
 mkdir -p slurm_logs

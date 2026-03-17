@@ -6,7 +6,7 @@
 #SBATCH --gres=gpu:h100:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=80G
-#SBATCH --account=def-yuntian
+#SBATCH --account=rrg-yuntian
 
 source scripts/slurm/common.sh
 mkdir -p slurm_logs
@@ -19,6 +19,6 @@ python baselines/finetuned/train_finetuned.py \
     --output-dir "$CKPT_DIR/FFT_ORACLE" \
     --use-oracle \
     --max-seq-length 4096 \
-    --epochs 3 --batch-size 4 --grad-accum 8 --lr 2e-5
+    --epochs 3 --batch-size 1 --grad-accum 32 --lr 2e-5
 
 echo "Done: $(date)"

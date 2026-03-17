@@ -6,7 +6,7 @@
 #SBATCH --gres=gpu:h100:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=80G
-#SBATCH --account=def-yuntian
+#SBATCH --account=rrg-yuntian
 
 source scripts/slurm/common.sh
 mkdir -p slurm_logs
@@ -18,8 +18,8 @@ python baselines/single_lora/train_single_lora.py \
     --splits-dir "$SPLITS_DIR" \
     --output-dir "$CKPT_DIR/SINGLE_LORA_ORACLE" \
     --use-oracle \
-    --rank 64 --lora-alpha 128 \
+    --rank 16 --lora-alpha 32 \
     --max-seq-length 4096 \
-    --epochs 3 --batch-size 4 --grad-accum 8 --lr 2e-4
+    --epochs 3 --batch-size 1 --grad-accum 32 --lr 2e-4
 
 echo "Done: $(date)"

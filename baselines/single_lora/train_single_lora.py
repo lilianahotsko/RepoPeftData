@@ -227,6 +227,7 @@ def main():
         lr_scheduler_type="cosine",
         warmup_ratio=0.05,
         bf16=True,
+        gradient_checkpointing=True,
         logging_steps=20,
         eval_strategy="epoch" if val_ds else "no",
         save_strategy="epoch",
