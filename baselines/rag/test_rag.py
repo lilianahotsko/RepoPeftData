@@ -146,6 +146,14 @@ def main():
     if hasattr(model.config, "use_cache"):
         model.config.use_cache = True
 
+    # Stop generation on FIM tokens — Qwen2.5-Coder can enter Fill-In-the-Middle
+    # mode when retrieved code chunks precede the prefix, producing garbage output.
+    # Adding FIM tokens as stop tokens prevents this without discarding the whole run.
+    _fim_strings = ["<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>", "<|fim_pad|>"]
+    _fim_ids = [tok.encode(t, add_special_tokens=False) for t in _fim_strings]
+    fim_stop_ids = [ids[0] for ids in _fim_ids if len(ids) == 1]
+    eos_ids = list({tok.eos_token_id} | set(fim_stop_ids))
+
     bos_id = get_bos_id(tok)
 
     em_count = 0
@@ -182,7 +190,7 @@ def main():
             out = model.generate(
                 input_t, max_new_tokens=args.max_new_tokens,
                 do_sample=False, pad_token_id=tok.pad_token_id,
-                eos_token_id=tok.eos_token_id,
+                eos_token_id=eos_ids,
             )
         gen_ids = out[0][len(input_ids):].tolist()
         pred = tok.decode(gen_ids, skip_special_tokens=True)
