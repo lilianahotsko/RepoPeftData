@@ -60,3 +60,4 @@ PAW_CODE
 *.out
 *.err
 *.html
+.claude

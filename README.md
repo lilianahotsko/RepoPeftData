@@ -219,3 +219,15 @@ Pairs with oracle context: 34723/39612 (87.7%)
   > 8192:  2618 (6.6%)
   >16384:   822 (2.1%)
   >32768:   251 (0.6%)
+
+
+  + FFT + RAG 
+  + related work -  Text2 Lora baseline , Doc2Lora, 
+  + merge table 1 and the ending of the 2, move the rest form the t2 to appendix
+  + t2 to appendix
+  + table5: remove the k
+  + remove table 5 and check the fig 3 (how many repos were used for these) 
+  + live code bench - analysis of the errors 
+  + table 6: make better examples like in text2lora + visualize the LoRA (like a heatmap ...) - to show that fft+drc is worse 
+  + add the distribution of the prefix with and without drc  (based on this - change the context length of the hypernet or lora/fft) 
+  + change chunk length for rag to 500 
