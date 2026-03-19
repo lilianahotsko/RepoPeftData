@@ -14,11 +14,54 @@ import sys
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from evaluation.metrics import postprocess_prediction, exact_match, edit_similarity, code_bleu_score, strip_comments
 from evaluation.data_utils import get_default_splits_dir, load_split, get_bos_id
+
+
+# ── RAG retrieval helpers (reused from baselines/rag/test_rag.py) ──────────
+
+def _load_cached_index(cache_dir: Path, repo_name: str) -> dict:
+    safe = repo_name.replace("/", "__")
+    path = cache_dir / f"{safe}.pt"
+    if not path.exists():
+        return {"chunks": [], "embeddings": None}
+    data = torch.load(path, map_location="cpu", weights_only=False)
+    return {
+        "chunks": data["chunks"],
+        "embeddings": data["embeddings"].float() if data["embeddings"] is not None else None,
+    }
+
+
+@torch.inference_mode()
+def _embed_query(text: str, model, tokenizer, device: str) -> torch.Tensor:
+    enc = tokenizer([text], padding=True, truncation=True, max_length=512, return_tensors="pt")
+    enc = {k: v.to(device) for k, v in enc.items()}
+    out = model(**enc)
+    mask = enc["attention_mask"].unsqueeze(-1)
+    mean = (out.last_hidden_state * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
+    return F.normalize(mean.cpu(), p=2, dim=-1)
+
+
+def _retrieve_and_prepend(prefix: str, repo: str, cache_dir: Path,
+                           repo_indices: dict, embed_model, embed_tok,
+                           embed_device: str, top_k: int) -> str:
+    if repo not in repo_indices:
+        repo_indices[repo] = _load_cached_index(cache_dir, repo)
+    index = repo_indices[repo]
+    if not index["chunks"]:
+        return prefix
+    query_emb = _embed_query(prefix, embed_model, embed_tok, embed_device)
+    emb = index["embeddings"]
+    sims = (query_emb.to(emb.dtype) @ emb.T).squeeze(0)
+    k = min(top_k, len(index["chunks"]))
+    _, top_idx = sims.topk(k)
+    chunks = [index["chunks"][i] for i in top_idx.tolist()]
+    context = "\n\n\n".join(chunks)
+    return f"{context}\n\n\n{prefix}"
 
 TARGET_MARKER = "### Target:"
 
@@ -73,6 +116,13 @@ def main():
     ap.add_argument("--limit-repos", type=int, default=None)
     ap.add_argument("--output", type=str, default=None)
     ap.add_argument("--device", type=str, default="cuda")
+    # RAG augmentation (optional)
+    ap.add_argument("--rag-cache-dir", type=str, default=None,
+                    help="Pre-built chunk index dir (build_indices.py). If set, top-k chunks prepended at inference.")
+    ap.add_argument("--top-k", type=int, default=5, help="Chunks to retrieve (used only with --rag-cache-dir)")
+    ap.add_argument("--embed-model-name", type=str, default="Qwen/Qwen3-Embedding-0.6B")
+    ap.add_argument("--oracle-cache-dir", type=str, default=None,
+                    help="Pre-built oracle context cache dir (ORACLE_CONTEXT_CACHE_V2). If set, DRC context prepended.")
     args = ap.parse_args()
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -83,6 +133,27 @@ def main():
         items = items[:args.limit]
     if not items:
         raise ValueError(f"No items in {args.split}.json at {splits_dir}")
+
+    # Optionally load oracle (DRC) context cache
+    oracle_cache_dir = None
+    oracle_contexts: dict = {}
+    if args.oracle_cache_dir:
+        from evaluation.oracle_utils import load_oracle_cache, lookup_oracle_context, augment_prefix_with_oracle
+        oracle_cache_dir = Path(args.oracle_cache_dir).expanduser().resolve()
+        print(f"Oracle DRC mode: cache={oracle_cache_dir}")
+
+    # Optionally load embedding model for RAG
+    rag_cache_dir = None
+    embed_model = embed_tok = None
+    repo_indices: dict = {}
+    if args.rag_cache_dir:
+        from transformers import AutoModel
+        rag_cache_dir = Path(args.rag_cache_dir).expanduser().resolve()
+        print(f"RAG mode: cache={rag_cache_dir}, top_k={args.top_k}, embed={args.embed_model_name}")
+        embed_tok = __import__("transformers").AutoTokenizer.from_pretrained(
+            args.embed_model_name, use_fast=True)
+        embed_model = AutoModel.from_pretrained(
+            args.embed_model_name, torch_dtype=torch.bfloat16).to(args.device).eval()
 
     print(f"Loading fine-tuned model: {args.model_path}")
     tok = AutoTokenizer.from_pretrained(args.model_path, trust_remote_code=True)
@@ -111,7 +182,23 @@ def main():
         if (start // batch_size + 1) % 10 == 0 or start == 0:
             print(f"  {min(start + batch_size, n)}/{n}...", flush=True)
 
-        prefixes = [it["prefix"] for it in batch_items]
+        if oracle_cache_dir:
+            prefixes = []
+            for it in batch_items:
+                repo = it["repo"]
+                if repo not in oracle_contexts:
+                    oracle_contexts[repo] = load_oracle_cache(oracle_cache_dir, repo)
+                oracle_code = lookup_oracle_context(oracle_contexts[repo], it.get("metadata", {}))
+                prefixes.append(augment_prefix_with_oracle(it["prefix"], oracle_code))
+        elif rag_cache_dir:
+            prefixes = [
+                _retrieve_and_prepend(it["prefix"], it["repo"], rag_cache_dir,
+                                      repo_indices, embed_model, embed_tok,
+                                      args.device, args.top_k)
+                for it in batch_items
+            ]
+        else:
+            prefixes = [it["prefix"] for it in batch_items]
         preds = invoke_batch(
             model, tok, prefixes, bos_id=bos_id,
             max_input_tokens=args.max_input_tokens,
