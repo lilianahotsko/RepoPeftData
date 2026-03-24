@@ -32,7 +32,10 @@ BASELINES_DIR = Path(os.environ.get("SCRATCH", os.path.expanduser("~/scratch")))
 KNOWN_EM = {
     50: 60.88,
     100: 61.27,
+    150: 61.51,
     200: 62.24,
+    500: 61.18,
+    623: 63.55,
 }
 
 SCALE_FILES = {

@@ -145,3 +145,58 @@ for split in SPLITS + ["all"]:
     if all_drc_lens[split]:
         print(f"  DRC context   (tokens, when present): {fmt(stats(all_drc_lens[split]))}")
         print(f"  DRC+Prefix    (total input tokens):   {fmt(stats(all_full_drc_lens[split]))}")
+
+# ── Generate figure ──────────────────────────────────────────────────────────
+try:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    FIGURE_DIR = Path(__file__).parent / "figures"
+    FIGURE_DIR.mkdir(exist_ok=True)
+
+    prefix_all = np.array(all_prefix_lens["all"])
+    drc_all = np.array(all_full_drc_lens["all"])
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4.5))
+
+    # Left: Prefix-only distribution
+    ax1.hist(prefix_all, bins=100, range=(0, 4000), color="#2563eb", alpha=0.8,
+             edgecolor="white", linewidth=0.5)
+    for ctx, color, ls in [(512, "#dc2626", "--"), (2048, "#16a34a", "--"), (4096, "#f59e0b", "--")]:
+        ax1.axvline(x=ctx, color=color, linestyle=ls, linewidth=1.5, alpha=0.8,
+                    label=f"{ctx} tokens")
+    ax1.set_xlabel("Token Count", fontsize=12)
+    ax1.set_ylabel("Number of QnA Pairs", fontsize=12)
+    ax1.set_title("Prefix-Only Input Length", fontsize=13, fontweight="bold")
+    ax1.legend(fontsize=9)
+    ax1.set_xlim(0, 4000)
+
+    # Right: DRC+Prefix distribution
+    ax2.hist(drc_all, bins=100, range=(0, 16384), color="#7c3aed", alpha=0.8,
+             edgecolor="white", linewidth=0.5)
+    for ctx, color, ls in [(2048, "#16a34a", "--"), (4096, "#f59e0b", "--"),
+                            (8192, "#dc2626", "--"), (16384, "#6b7280", ":")]:
+        ax2.axvline(x=ctx, color=color, linestyle=ls, linewidth=1.5, alpha=0.8,
+                    label=f"{ctx} tokens")
+    ax2.set_xlabel("Token Count", fontsize=12)
+    ax2.set_ylabel("Number of QnA Pairs", fontsize=12)
+    ax2.set_title("DRC + Prefix Input Length", fontsize=13, fontweight="bold")
+    ax2.legend(fontsize=9)
+    ax2.set_xlim(0, 16384)
+
+    plt.tight_layout()
+    out_path = FIGURE_DIR / "input_length_distribution.pdf"
+    plt.savefig(out_path, dpi=300, bbox_inches="tight")
+    print(f"\nFigure saved to {out_path}")
+    plt.close()
+
+    # Also copy to paper figures directory
+    paper_fig_dir = Path(__file__).parent.parent / "RepoPeft_Paper" / "figures"
+    if paper_fig_dir.exists():
+        import shutil
+        shutil.copy2(out_path, paper_fig_dir / "input_length_distribution.pdf")
+        print(f"Copied to {paper_fig_dir / 'input_length_distribution.pdf'}")
+
+except ImportError as e:
+    print(f"\nCould not generate figure (missing dependency): {e}")
