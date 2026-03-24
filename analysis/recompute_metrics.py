@@ -17,7 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from evaluation.metrics import postprocess_prediction, exact_match, edit_similarity, code_bleu_score, strip_comments
 
 
-def recompute(result_path: Path) -> dict | None:
+def recompute(result_path: Path, save: bool = False) -> dict | None:
     try:
         data = json.loads(result_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
@@ -47,7 +47,13 @@ def recompute(result_path: Path) -> dict | None:
         edit_sum += es
         bleu_sum += bl
 
-    return {
+        # Update per-entry metrics
+        e["exact_match"] = em
+        e["edit_similarity"] = es
+        e["code_bleu"] = bl
+        e["got"] = pred_clean
+
+    result = {
         "file": result_path.name,
         "n": n,
         "exact_match_pct": 100.0 * em_count / n,
@@ -58,27 +64,44 @@ def recompute(result_path: Path) -> dict | None:
         "old_cb": data.get("code_bleu", 0),
     }
 
+    if save:
+        data["exact_match_pct"] = result["exact_match_pct"]
+        data["exact_match_count"] = em_count
+        data["edit_similarity"] = result["edit_similarity"]
+        data["code_bleu"] = result["code_bleu"]
+        data["entries"] = entries
+        result_path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    return result
+
 
 def main():
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--save", action="store_true", help="Write updated metrics back to JSON files")
+    args = ap.parse_args()
+
     results_dir = Path(os.environ.get("SCRATCH", os.path.expanduser("~/scratch"))) / "BASELINES"
     if not results_dir.exists():
         print(f"Results dir not found: {results_dir}")
         return
 
     files = sorted(results_dir.glob("*.json"))
-    print(f"Found {len(files)} result files in {results_dir}\n")
+    print(f"Found {len(files)} result files in {results_dir}")
+    if args.save:
+        print("  ** --save enabled: JSON files will be updated in-place **")
+    print()
 
-    header = f"{'File':<45} | {'Old EM':>7} | {'New EM':>7} | {'Δ EM':>6} | {'Old ES':>7} | {'New ES':>7} | {'Δ ES':>6}"
+    header = f"{'File':<45} | {'Old CB':>7} | {'New CB':>7} | {'Δ CB':>7}"
     print(header)
     print("-" * len(header))
 
     for f in files:
-        r = recompute(f)
+        r = recompute(f, save=args.save)
         if r is None:
             continue
-        d_em = r["exact_match_pct"] - r["old_em"]
-        d_es = r["edit_similarity"] - r["old_es"]
-        print(f"{r['file']:<45} | {r['old_em']:>6.2f}% | {r['exact_match_pct']:>6.2f}% | {d_em:>+5.2f} | {r['old_es']:>7.4f} | {r['edit_similarity']:>7.4f} | {d_es:>+6.4f}")
+        d_cb = r["code_bleu"] - r["old_cb"]
+        print(f"{r['file']:<45} | {r['old_cb']:>7.4f} | {r['code_bleu']:>7.4f} | {d_cb:>+7.4f}")
 
 
 if __name__ == "__main__":

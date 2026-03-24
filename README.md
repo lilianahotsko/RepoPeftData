@@ -231,3 +231,6 @@ Pairs with oracle context: 34723/39612 (87.7%)
   + table 6: make better examples like in text2lora + visualize the LoRA (like a heatmap ...) - to show that fft+drc is worse 
   + add the distribution of the prefix with and without drc  (based on this - change the context length of the hypernet or lora/fft) 
   + change chunk length for rag to 500 
+
+
+
