@@ -86,11 +86,17 @@ class PrefixTargetDataCollator(DataCollatorForLanguageModeling):
 def load_all_training_pairs(
     splits_dir: Path,
     oracle_cache_dir: Path | None = None,
+    max_oracle_tokens: int | None = None,
+    tokenizer=None,
 ) -> list[dict]:
     """Load all QnA pairs from train.json.
-    If *oracle_cache_dir* is given, prepend oracle context to each prefix."""
+    If *oracle_cache_dir* is given, prepend oracle context to each prefix.
+    If *max_oracle_tokens* is set, compress oracle context to fit within that budget."""
     if oracle_cache_dir:
-        from evaluation.oracle_utils import load_oracle_cache, lookup_oracle_context, augment_prefix_with_oracle
+        from evaluation.oracle_utils import (
+            load_oracle_cache, lookup_oracle_context,
+            augment_prefix_with_oracle, augment_prefix_with_compressed_oracle,
+        )
 
     path = splits_dir / "train.json"
     if not path.exists():
@@ -99,6 +105,7 @@ def load_all_training_pairs(
     repos = data.get("repositories", {})
     pairs = []
     n_augmented = 0
+    use_compression = max_oracle_tokens is not None and tokenizer is not None
     for repo_name, r in repos.items():
         oracle_contexts = load_oracle_cache(oracle_cache_dir, repo_name) if oracle_cache_dir else {}
         for p in r.get("qna_pairs", []):
@@ -111,11 +118,17 @@ def load_all_training_pairs(
             if oracle_contexts:
                 oracle_code = lookup_oracle_context(oracle_contexts, p.get("metadata", {}))
                 if oracle_code:
-                    prefix = augment_prefix_with_oracle(prefix, oracle_code)
+                    if use_compression:
+                        prefix = augment_prefix_with_compressed_oracle(
+                            prefix, oracle_code, tokenizer, max_oracle_tokens,
+                        )
+                    else:
+                        prefix = augment_prefix_with_oracle(prefix, oracle_code)
                     n_augmented += 1
             pairs.append({"prefix": prefix, "target": target, "repo": repo_name})
     if oracle_cache_dir:
-        print(f"  Oracle context: augmented {n_augmented}/{len(pairs)} pairs ({100*n_augmented/max(1,len(pairs)):.1f}%)")
+        tag = f" (compressed to {max_oracle_tokens} tokens)" if use_compression else ""
+        print(f"  Oracle context{tag}: augmented {n_augmented}/{len(pairs)} pairs ({100*n_augmented/max(1,len(pairs)):.1f}%)")
     return pairs
 
 
@@ -148,7 +161,11 @@ def main():
     ap.add_argument("--use-oracle", action="store_true",
                     help="Prepend oracle context to prefixes")
     ap.add_argument("--oracle-cache-dir", type=str, default=None)
+    ap.add_argument("--max-oracle-tokens", type=int, default=None,
+                    help="Compress oracle context to fit within this token budget (e.g. 6000)")
     ap.add_argument("--no-wandb", action="store_true")
+    ap.add_argument("--no-eval", action="store_true",
+                    help="Disable in-training eval (avoids OOM at long context)")
     ap.add_argument("--seed", type=int, default=3407)
     args = ap.parse_args()
 
@@ -156,14 +173,27 @@ def main():
 
     oracle_cache_dir = None
     if args.use_oracle:
-        from evaluation.oracle_utils import get_default_oracle_cache_dir, load_oracle_cache, lookup_oracle_context, augment_prefix_with_oracle
+        from evaluation.oracle_utils import (
+            get_default_oracle_cache_dir, load_oracle_cache,
+            lookup_oracle_context, augment_prefix_with_oracle,
+            augment_prefix_with_compressed_oracle,
+        )
         oracle_cache_dir = Path(args.oracle_cache_dir or get_default_oracle_cache_dir()).expanduser().resolve()
         if not oracle_cache_dir.exists():
             raise FileNotFoundError(f"Oracle cache not found: {oracle_cache_dir}")
         print(f"Using oracle context from {oracle_cache_dir}")
+        if args.max_oracle_tokens:
+            print(f"  Compressing oracle context to {args.max_oracle_tokens} tokens")
+
+    # Load tokenizer early (needed for oracle compression and later for model)
+    print(f"Loading tokenizer: {args.model_name}")
+    tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
 
     print("Loading training data...")
-    train_pairs = load_all_training_pairs(splits_dir, oracle_cache_dir=oracle_cache_dir)
+    train_pairs = load_all_training_pairs(
+        splits_dir, oracle_cache_dir=oracle_cache_dir,
+        max_oracle_tokens=args.max_oracle_tokens, tokenizer=tokenizer,
+    )
     print(f"Loaded {len(train_pairs)} training pairs")
 
     val_path = splits_dir / f"{args.val_split}.json"
@@ -180,15 +210,17 @@ def main():
                 if oracle_contexts:
                     oracle_code = lookup_oracle_context(oracle_contexts, p.get("metadata", {}))
                     if oracle_code:
-                        prefix = augment_prefix_with_oracle(prefix, oracle_code)
+                        if args.max_oracle_tokens:
+                            prefix = augment_prefix_with_compressed_oracle(
+                                prefix, oracle_code, tokenizer, args.max_oracle_tokens,
+                            )
+                        else:
+                            prefix = augment_prefix_with_oracle(prefix, oracle_code)
                 val_pairs.append({"prefix": prefix, "target": target, "repo": repo_name})
     print(f"Loaded {len(val_pairs)} validation pairs")
 
     train_ds = Dataset.from_list(train_pairs)
     val_ds = Dataset.from_list(val_pairs) if val_pairs else None
-
-    print(f"Loading model: {args.model_name} (bf16, no quantization)")
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.truncation_side = "left"
     tokenizer.padding_side = "left"
@@ -197,7 +229,8 @@ def main():
         args.model_name,
         trust_remote_code=True,
         torch_dtype=torch.bfloat16,
-        device_map="auto",
+        attn_implementation="flash_attention_2",
+        device_map={"": "cuda:0"},
     )
 
     lora_config = LoraConfig(
@@ -229,11 +262,11 @@ def main():
         bf16=True,
         gradient_checkpointing=True,
         logging_steps=20,
-        eval_strategy="epoch" if val_ds else "no",
+        eval_strategy="no" if args.no_eval else ("epoch" if val_ds else "no"),
         save_strategy="epoch",
         save_total_limit=3,
-        load_best_model_at_end=True if val_ds else False,
-        metric_for_best_model="eval_loss" if val_ds else None,
+        load_best_model_at_end=False if args.no_eval else (True if val_ds else False),
+        metric_for_best_model=None if args.no_eval else ("eval_loss" if val_ds else None),
         optim="adamw_torch",
         max_grad_norm=1.0,
         seed=args.seed,

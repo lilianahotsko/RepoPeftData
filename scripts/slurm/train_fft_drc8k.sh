@@ -11,16 +11,17 @@
 source scripts/slurm/common.sh
 mkdir -p slurm_logs
 
-echo "===== Train: FFT + DRC v2, max_seq=8192 ====="
+echo "===== Train: FFT + DRC v3, max_seq=8192 ====="
 echo "Start: $(date)"
 
-# Saves to FFT_DRC8K — does NOT overwrite FFT_ORACLE (4K v1 cache)
 python baselines/finetuned/train_finetuned.py \
     --splits-dir "$SPLITS_DIR" \
-    --output-dir "$CKPT_DIR/FFT_DRC8K" \
+    --output-dir "$CKPT_DIR/FFT_DRC_V3_8K" \
     --use-oracle \
-    --oracle-cache-dir "$SCRATCH/ORACLE_CONTEXT_CACHE_V2" \
+    --oracle-cache-dir "$SCRATCH/ORACLE_CONTEXT_CACHE_V3" \
+    --max-oracle-tokens 6000 \
     --max-seq-length 8192 \
+    --no-eval \
     --epochs 3 --batch-size 1 --grad-accum 32 --lr 2e-5
 
 echo "Done: $(date)"

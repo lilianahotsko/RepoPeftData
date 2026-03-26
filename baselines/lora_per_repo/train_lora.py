@@ -112,12 +112,18 @@ def load_from_split(
     splits_dir: Path, split_name: str, limit_repos: int = 1,
     oracle_cache_dir: Path | None = None,
     repo_filter: str | None = None,
+    max_oracle_tokens: int | None = None,
+    tokenizer=None,
 ) -> tuple[list[dict], str]:
     """Load qna_pairs from split JSON. Returns (pairs, repo_full).
     If *repo_filter* is given, select only that repo (ignoring limit_repos).
-    If *oracle_cache_dir* is given, prepend oracle context to each prefix."""
+    If *oracle_cache_dir* is given, prepend oracle context to each prefix.
+    If *max_oracle_tokens* is set, compress oracle context to fit within that budget."""
     if oracle_cache_dir:
-        from evaluation.oracle_utils import load_oracle_cache, lookup_oracle_context, augment_prefix_with_oracle
+        from evaluation.oracle_utils import (
+            load_oracle_cache, lookup_oracle_context,
+            augment_prefix_with_oracle, augment_prefix_with_compressed_oracle,
+        )
 
     path = splits_dir / f"{split_name}.json"
     if not path.exists():
@@ -147,7 +153,13 @@ def load_from_split(
             if oracle_contexts:
                 oracle_code = lookup_oracle_context(oracle_contexts, p.get("metadata", {}))
                 if oracle_code:
-                    prefix = augment_prefix_with_oracle(prefix, oracle_code)
+                    use_compression = max_oracle_tokens is not None and tokenizer is not None
+                    if use_compression:
+                        prefix = augment_prefix_with_compressed_oracle(
+                            prefix, oracle_code, tokenizer, max_oracle_tokens,
+                        )
+                    else:
+                        prefix = augment_prefix_with_oracle(prefix, oracle_code)
             pairs.append({"prefix": prefix, "target": target})
     if not pairs:
         raise ValueError(f"No qna_pairs in first {limit_repos} repo(s) of {path}")
@@ -158,11 +170,17 @@ def load_from_split(
 def load_val_for_repos(
     splits_dir: Path, val_split: str, repo_names: list[str],
     oracle_cache_dir: Path | None = None,
+    max_oracle_tokens: int | None = None,
+    tokenizer=None,
 ) -> list[dict]:
     """Load qna_pairs from val_split for the given repos.
-    If *oracle_cache_dir* is given, prepend oracle context to each prefix."""
+    If *oracle_cache_dir* is given, prepend oracle context to each prefix.
+    If *max_oracle_tokens* is set, compress oracle context to fit within that budget."""
     if oracle_cache_dir:
-        from evaluation.oracle_utils import load_oracle_cache, lookup_oracle_context, augment_prefix_with_oracle
+        from evaluation.oracle_utils import (
+            load_oracle_cache, lookup_oracle_context,
+            augment_prefix_with_oracle, augment_prefix_with_compressed_oracle,
+        )
 
     path = splits_dir / f"{val_split}.json"
     if not path.exists():
@@ -183,7 +201,13 @@ def load_val_for_repos(
             if oracle_contexts:
                 oracle_code = lookup_oracle_context(oracle_contexts, p.get("metadata", {}))
                 if oracle_code:
-                    prefix = augment_prefix_with_oracle(prefix, oracle_code)
+                    use_compression = max_oracle_tokens is not None and tokenizer is not None
+                    if use_compression:
+                        prefix = augment_prefix_with_compressed_oracle(
+                            prefix, oracle_code, tokenizer, max_oracle_tokens,
+                        )
+                    else:
+                        prefix = augment_prefix_with_oracle(prefix, oracle_code)
             pairs.append({"prefix": prefix, "target": target})
     return pairs
 
@@ -272,7 +296,11 @@ def main():
     parser.add_argument("--use-oracle", action="store_true",
                         help="Prepend oracle context to prefixes")
     parser.add_argument("--oracle-cache-dir", type=str, default=None)
+    parser.add_argument("--max-oracle-tokens", type=int, default=None,
+                        help="Compress oracle context to fit within this token budget (e.g. 6000)")
     parser.add_argument("--no-wandb", action="store_true", help="Disable wandb logging")
+    parser.add_argument("--no-eval", action="store_true",
+                        help="Disable in-training eval (avoids OOM at long context)")
     args = parser.parse_args()
 
     scratch = os.environ.get("SCRATCH", os.path.expanduser("~/scratch"))
@@ -285,6 +313,13 @@ def main():
         if not oracle_cache_dir.exists():
             raise FileNotFoundError(f"Oracle cache not found: {oracle_cache_dir}")
         print(f"Using oracle context from {oracle_cache_dir}")
+        if args.max_oracle_tokens:
+            print(f"  Compressing oracle context to {args.max_oracle_tokens} tokens")
+
+    # Load tokenizer early if needed for oracle compression
+    tokenizer_early = None
+    if args.max_oracle_tokens and oracle_cache_dir:
+        tokenizer_early = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
 
     # Resolve data source
     if args.from_split:
@@ -297,6 +332,8 @@ def main():
             splits_dir, args.from_split, limit_repos=args.limit_repos,
             oracle_cache_dir=oracle_cache_dir,
             repo_filter=args.repo_name,
+            max_oracle_tokens=args.max_oracle_tokens,
+            tokenizer=tokenizer_early,
         )
         examples = qna_to_examples(train_pairs)
         path = splits_dir / f"{args.from_split}.json"
@@ -308,6 +345,8 @@ def main():
         val_pairs = load_val_for_repos(
             splits_dir, args.val_split, repo_names,
             oracle_cache_dir=oracle_cache_dir,
+            max_oracle_tokens=args.max_oracle_tokens,
+            tokenizer=tokenizer_early,
         )
         val_examples = qna_to_examples(val_pairs)
     elif args.qna_path:
@@ -358,7 +397,8 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(
         MODEL_NAME,
         torch_dtype=torch.bfloat16,
-        device_map="auto",
+        attn_implementation="flash_attention_2",
+        device_map={"": "cuda:0"},
         trust_remote_code=True,
     )
 
@@ -391,12 +431,13 @@ def main():
         lr_scheduler_type="cosine",
         warmup_ratio=0.1,
         bf16=True,
+        gradient_checkpointing=True,
         logging_steps=10,
-        eval_strategy="epoch",
+        eval_strategy="no" if args.no_eval else "epoch",
         save_strategy="epoch",
         save_total_limit=1,
-        load_best_model_at_end=True,
-        metric_for_best_model="eval_loss",
+        load_best_model_at_end=not args.no_eval,
+        metric_for_best_model="eval_loss" if not args.no_eval else None,
         optim="adamw_torch",
         max_grad_norm=0.3,
         report_to="none" if args.no_wandb else "wandb",

@@ -18,6 +18,7 @@ python baselines/single_lora/train_single_lora.py \
     --output-dir "$CKPT_DIR/SINGLE_LORA_DRC8K" \
     --use-oracle \
     --oracle-cache-dir "$ORACLE_CACHE_DIR" \
+    --max-oracle-tokens 6000 \
     --rank 16 --lora-alpha 32 \
     --max-seq-length 8192 \
     --epochs 3 --batch-size 1 --grad-accum 32 --lr 2e-4

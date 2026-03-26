@@ -234,3 +234,253 @@ Pairs with oracle context: 34723/39612 (87.7%)
 
 
 
+
+
++ cap the drc at 6k
++ memory issue on the LoRA
++ unify everything to 8k
++ perrepo Lora+ DRC
++ add the real results from the text-to-lora
++ full repo sizes
++ in table 1: add the last 3 rows into the 3 columns  (avg prefix, repo-full and target)
+
+
+---
+
+# QnA Pair Visualization — Prefix Only vs. Prefix + DRC v3
+
+## Example 1: `N-Wouda/ALNS` — `test_late_acceptance_hill_climbing.py::11`
+
+**Target:** `(ValueError, TypeError))`
+
+### Setup A: Prefix Only (Pretrained / Single-LoRA / FFT)
+
+```python
+import numpy.random as rnd
+from numpy.testing import assert_, assert_equal, assert_raises
+from pytest import mark
+
+from alns.accept import LateAcceptanceHillClimbing
+from alns.tests.states import One, Two, Zero
+
+@mark.parametrize("lookback_period", [-0.01, -10, 1.5])
+def test_raises_invalid_lookback_period(lookback_period):
+
+    with assert_raises(
+        ▶ ???
+```
+
+> The model sees the import and test parameters but has **no access** to `LateAcceptanceHillClimbing`'s source.
+> It must guess that negative values raise `ValueError` *and* that `1.5` raises `TypeError`.
+
+### Setup B: Prefix + DRC v3 (Oracle Context)
+
+```python
+# ── DRC v3 Context (2500 chars, compression_ratio=1.0) ────────────────
+# Source: alns/accept/LateAcceptanceHillClimbing.py
+class LateAcceptanceHillClimbing:
+    """
+    The Late Acceptance Hill Climbing (LAHC) criterion accepts a candidate
+    solution when it is better than the current solution from a number of
+    iterations ago.
+    ...
+    Parameters
+    ----------
+    lookback_period: int
+        Non-negative integer specifying which solution to compare against
+        for late acceptance. ...
+    greedy: bool
+        ...
+    better_history: bool
+        ...
+    """
+
+    def __init__(
+        self,
+        lookback_period: int,
+        greedy: bool = False,
+        better_history: bool = False,
+    ):
+        self._lookback_period = lookback_period
+        ...
+
+        if lookback_period < 0:
+            raise ValueError("lookback_period must be a non-negative integer.")
+
+        self._history: deque = deque([], maxlen=lookback_period)
+        # ^^^ maxlen=1.5 will raise TypeError
+    ...
+# ── End DRC v3 ─────────────────────────────────────────────────────────
+
+
+# ── Prefix ─────────────────────────────────────────────────────────────
+import numpy.random as rnd
+from numpy.testing import assert_, assert_equal, assert_raises
+from pytest import mark
+
+from alns.accept import LateAcceptanceHillClimbing
+from alns.tests.states import One, Two, Zero
+
+@mark.parametrize("lookback_period", [-0.01, -10, 1.5])
+def test_raises_invalid_lookback_period(lookback_period):
+
+    with assert_raises(
+        ▶ (ValueError, TypeError))
+```
+
+> With DRC v3, the model sees: `raise ValueError(...)` for negative values,
+> and `deque([], maxlen=lookback_period)` where `maxlen=1.5` triggers `TypeError`.
+> The correct tuple `(ValueError, TypeError)` becomes inferable.
+
+---
+
+## Example 2: `QuixiAI/Hexis` — `test_brave_search.py::31`
+
+**Target:** `ToolCategory.WEB`
+
+### Setup A: Prefix Only
+
+```python
+from __future__ import annotations
+
+from unittest.mock import MagicMock
+
+import pytest
+
+from core.tools.base import ToolCategory, ToolContext, ToolErrorType, ToolExecutionContext
+from core.tools.brave_search import (
+    BraveSearchHandler,
+    create_brave_search_tools,
+)
+
+def _make_context():
+    registry = MagicMock()
+    registry.pool = MagicMock()
+    return ToolExecutionContext(
+        tool_context=ToolContext.CHAT,
+        call_id="test-call",
+        registry=registry,
+    )
+
+class TestBraveSearchSpec:
+
+    def test_spec_category_is_web(self):
+
+        assert BraveSearchHandler().spec.category ==
+            ▶ ???
+```
+
+> The model sees `ToolCategory` is imported but has **no access** to the enum values
+> or to `BraveSearchHandler.spec` to know it returns `ToolCategory.WEB`.
+
+### Setup B: Prefix + DRC v3 (3711 chars, compression_ratio=1.0)
+
+```python
+# ── DRC v3 Context ─────────────────────────────────────────────────────
+# Source: core/tools/base.py
+class ToolCategory(str, Enum):
+    """Categories of tools for organization and policy."""
+    MEMORY = "memory"
+    WEB = "web"
+    FILESYSTEM = "filesystem"
+    SHELL = "shell"
+    CODE = "code"
+    BROWSER = "browser"
+    ...
+
+# Source: core/tools/brave_search.py
+class BraveSearchHandler(ToolHandler):
+    """Search the web using the Brave Search API."""
+    ...
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name="brave_search",
+            description="Search the web using Brave Search. ...",
+            parameters={...},
+            category=ToolCategory.WEB,      # ◀ answer visible here
+            energy_cost=2,
+            is_read_only=True,
+            optional=True,
+        )
+    ...
+# ── End DRC v3 ─────────────────────────────────────────────────────────
+
+
+# ── Prefix ─────────────────────────────────────────────────────────────
+...
+    def test_spec_category_is_web(self):
+        assert BraveSearchHandler().spec.category ==
+            ▶ ToolCategory.WEB
+```
+
+> The DRC v3 context provides both the `ToolCategory` enum definition and
+> `BraveSearchHandler.spec` property with `category=ToolCategory.WEB` — the
+> answer is directly extractable from the resolved source code.
+
+---
+
+## Example 3: `agronholm/anyio` — `test_deprecations.py::11`
+
+**Target:** `anyio.BrokenWorkerInterpreter`
+
+### Setup A: Prefix Only
+
+```python
+from __future__ import annotations
+
+import pytest
+
+import anyio
+
+def test_broken_worker_interpreter_deprecation() -> None:
+    with pytest.warns(DeprecationWarning):
+        DeprecatedClass = anyio.BrokenWorkerIntepreter  # note: typo
+
+    assert DeprecatedClass is
+        ▶ ???
+```
+
+> The model must figure out that `BrokenWorkerIntepreter` (typo) is a deprecated
+> alias that points to `BrokenWorkerInterpreter` (correct spelling).
+> Without source access, the model has no way to know the target class name.
+
+### Setup B: Prefix + DRC v3 (402 chars, compression_ratio=1.0)
+
+```python
+# ── DRC v3 Context ─────────────────────────────────────────────────────
+# Source: src/anyio/__init__.py
+for __value in list(locals().values()):
+    if getattr(__value, "__module__", "").startswith("anyio."):
+        __value.__module__ = __name__
+del __value
+
+def __getattr__(attr: str) -> type[BrokenWorkerInterpreter]:
+    """Support deprecated aliases."""
+    if attr == "BrokenWorkerIntepreter":
+        ...
+# ── End DRC v3 ─────────────────────────────────────────────────────────
+
+
+# ── Prefix ─────────────────────────────────────────────────────────────
+...
+    assert DeprecatedClass is
+        ▶ anyio.BrokenWorkerInterpreter
+```
+
+> The DRC v3 shows `__getattr__` handling the typo alias, with
+> return type `type[BrokenWorkerInterpreter]`. The mapping from
+> deprecated `BrokenWorkerIntepreter` → `BrokenWorkerInterpreter` is clear.
+
+---
+
+### Key Takeaways
+
+| Example | Prefix only | + DRC v3 | Why DRC helps |
+|---------|-------------|----------|---------------|
+| ALNS `assert_raises(...)` | Must guess error types | Sees `raise ValueError` + `deque(maxlen=...)` | Constructor validation logic visible |
+| Hexis `spec.category ==` | Knows `ToolCategory` exists, not its value | Sees `category=ToolCategory.WEB` in spec | Property return value directly visible |
+| anyio `DeprecatedClass is` | Typo alias, no way to know correct name | Sees `__getattr__` mapping to `BrokenWorkerInterpreter` | Deprecation alias mapping visible |
+
+

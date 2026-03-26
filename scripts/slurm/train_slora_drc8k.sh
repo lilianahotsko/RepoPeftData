@@ -11,17 +11,18 @@
 source scripts/slurm/common.sh
 mkdir -p slurm_logs
 
-echo "===== Train: Single LoRA + DRC v2, max_seq=8192 ====="
+echo "===== Train: Single LoRA + DRC v3, max_seq=8192 ====="
 echo "Start: $(date)"
 
-# Saves to SINGLE_LORA_DRC8K — does NOT overwrite SINGLE_LORA_ORACLE (4K v1 cache)
 python baselines/single_lora/train_single_lora.py \
     --splits-dir "$SPLITS_DIR" \
-    --output-dir "$CKPT_DIR/SINGLE_LORA_DRC8K" \
+    --output-dir "$CKPT_DIR/SINGLE_LORA_DRC_V3_8K" \
     --use-oracle \
-    --oracle-cache-dir "$SCRATCH/ORACLE_CONTEXT_CACHE_V2" \
+    --oracle-cache-dir "$SCRATCH/ORACLE_CONTEXT_CACHE_V3" \
+    --max-oracle-tokens 6000 \
     --rank 16 --lora-alpha 32 \
     --max-seq-length 8192 \
+    --no-eval \
     --epochs 3 --batch-size 1 --grad-accum 32 --lr 2e-4
 
 echo "Done: $(date)"

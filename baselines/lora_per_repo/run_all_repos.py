@@ -42,7 +42,11 @@ def main():
                     help="Pass through to train_lora.py")
     ap.add_argument("--oracle-cache-dir", type=str, default=None,
                     help="Pass through to train_lora.py")
+    ap.add_argument("--max-oracle-tokens", type=int, default=None,
+                    help="Pass through to train_lora.py (compress oracle context)")
     ap.add_argument("--no-wandb", action="store_true")
+    ap.add_argument("--no-eval", action="store_true",
+                    help="Pass through to train_lora.py (disable in-training eval)")
     args = ap.parse_args()
 
     splits_dir = Path(args.splits_dir).expanduser().resolve()
@@ -95,6 +99,10 @@ def main():
                     cmd.extend(["--oracle-cache-dir", args.oracle_cache_dir])
                 if args.max_seq_length:
                     cmd.extend(["--max-seq-length", str(args.max_seq_length)])
+                if args.max_oracle_tokens:
+                    cmd.extend(["--max-oracle-tokens", str(args.max_oracle_tokens)])
+                if args.no_eval:
+                    cmd.append("--no-eval")
                 print(f"  Training LoRA for {repo}...")
                 result = subprocess.run(cmd, capture_output=True, text=True)
                 if result.returncode != 0:

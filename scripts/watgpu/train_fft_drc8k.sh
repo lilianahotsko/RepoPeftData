@@ -18,6 +18,7 @@ python baselines/finetuned/train_finetuned.py \
     --output-dir "$CKPT_DIR/FFT_DRC8K" \
     --use-oracle \
     --oracle-cache-dir "$ORACLE_CACHE_DIR" \
+    --max-oracle-tokens 6000 \
     --max-seq-length 8192 \
     --epochs 3 --batch-size 1 --grad-accum 32 --lr 2e-5
 

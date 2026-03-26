@@ -13,6 +13,8 @@ from typing import Optional
 
 def get_default_oracle_cache_dir(version: str = "v1") -> str:
     scratch = os.environ.get("SCRATCH", os.path.expanduser("~/scratch"))
+    if version == "v3":
+        return os.path.join(scratch, "ORACLE_CONTEXT_CACHE_V3")
     if version == "v2":
         return os.path.join(scratch, "ORACLE_CONTEXT_CACHE_V2")
     return os.path.join(scratch, "ORACLE_CONTEXT_CACHE")
@@ -55,6 +57,31 @@ def augment_prefix_with_oracle(
         oracle_code = oracle_code[:max_oracle_chars]
 
     return oracle_code + "\n\n\n" + prefix
+
+
+def augment_prefix_with_compressed_oracle(
+    prefix: str,
+    oracle_code: str,
+    tokenizer,
+    max_oracle_tokens: int = 6000,
+) -> str:
+    """
+    Compress oracle context to fit within *max_oracle_tokens* and prepend to prefix.
+
+    Uses relevance-aware compression: class bodies are reduced to signatures,
+    definitions are prioritized by how directly they're referenced in the prefix,
+    and the budget is filled greedily from highest to lowest priority.
+    """
+    if not oracle_code or not oracle_code.strip():
+        return prefix
+
+    from evaluation.compress_context import compress_oracle_context
+    compressed = compress_oracle_context(oracle_code, prefix, tokenizer, max_oracle_tokens)
+
+    if not compressed or not compressed.strip():
+        return prefix
+
+    return compressed + "\n\n\n" + prefix
 
 
 def load_oracle_for_split(

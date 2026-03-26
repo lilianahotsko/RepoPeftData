@@ -18,6 +18,7 @@ DATASET_ROOT = Path(SCRATCH) / "REPO_DATASET"
 CKPT_ROOT = Path(SCRATCH) / "TRAINING_CHECKPOINTS"
 BASELINES_ROOT = Path(SCRATCH) / "BASELINES"
 ORACLE_CACHE = Path(SCRATCH) / "ORACLE_CONTEXT_CACHE_V2"
+ORACLE_CACHE_V3 = Path(SCRATCH) / "ORACLE_CONTEXT_CACHE_V3"
 DEFAULT_USER = "nanigock"
 DS_REPO = "RepoPeft-data"
 CK_REPO = "RepoPeft-checkpoints"
@@ -36,7 +37,8 @@ Repository-level code completion dataset for hypernetwork-based LoRA generation.
 ```
 splits/main/           # Original splits (train, cr_val, cr_test, ir_val, ir_test + structured)
 splits/expanded/       # Expanded training (~609 repos)
-oracle_context_cache/  # Pre-computed DRC context (370 MB, 512 repos)
+oracle_context_cache/   # Pre-computed DRC context v2 (uncompressed, 512 repos)
+oracle_context_cache_v3/ # Compressed DRC context v3 (6K token budget, 512 repos)
 evaluation_results/    # Pre-computed baseline JSONs
 ```
 """
@@ -113,11 +115,16 @@ def push_ds(api, a):
           "cr_val_structured.json","ir_test.json","ir_val.json"]
     print("\n--- Expanded splits ---")
     for f in ef: up(api, DATASET_ROOT/"expanded"/f, rid, f"splits/expanded/{f}", "dataset", a.dry_run)
-    print("\n--- Oracle context cache ---")
+    print("\n--- Oracle context cache (v2) ---")
     if ORACLE_CACHE.exists():
         up(api, ORACLE_CACHE, rid, "oracle_context_cache", "dataset", a.dry_run)
     else:
         print(f"  SKIP (missing): {ORACLE_CACHE}")
+    print("\n--- Oracle context cache (v3, compressed) ---")
+    if ORACLE_CACHE_V3.exists():
+        up(api, ORACLE_CACHE_V3, rid, "oracle_context_cache_v3", "dataset", a.dry_run)
+    else:
+        print(f"  SKIP (missing): {ORACLE_CACHE_V3}")
     if a.results or a.all:
         print("\n--- Evaluation results ---")
         for f in sorted(BASELINES_ROOT.glob("*.json")):
