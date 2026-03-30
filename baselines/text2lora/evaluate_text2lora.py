@@ -111,6 +111,12 @@ def main():
     ap.add_argument("--max-new-tokens", type=int, default=128)
     ap.add_argument("--max-input-tokens", type=int, default=16384)
     ap.add_argument("--limit-repos", type=int, default=None)
+    ap.add_argument("--use-oracle", action="store_true",
+                    help="Prepend oracle context to prefixes")
+    ap.add_argument("--oracle-cache-dir", type=str, default=None,
+                    help="Dir with pre-built oracle contexts")
+    ap.add_argument("--max-oracle-tokens", type=int, default=None,
+                    help="Compress oracle context to fit within this token budget")
     ap.add_argument("--device", type=str, default="cuda")
     args = ap.parse_args()
 
@@ -149,6 +155,33 @@ def main():
     if not items:
         print(f"No items found in {args.split}.json at {splits_dir}")
         return
+
+    # ── Oracle context augmentation ────────────────────────────────────────
+    if args.use_oracle:
+        from evaluation.oracle_utils import (
+            load_oracle_cache, lookup_oracle_context,
+            augment_prefix_with_oracle, augment_prefix_with_compressed_oracle,
+            get_default_oracle_cache_dir,
+        )
+        oracle_cache_dir = Path(args.oracle_cache_dir or get_default_oracle_cache_dir())
+        use_compression = args.max_oracle_tokens is not None
+        print(f"Augmenting prefixes with oracle context from {oracle_cache_dir}")
+        if use_compression:
+            print(f"  Compressing to {args.max_oracle_tokens} tokens")
+        n_aug = 0
+        for item in items:
+            oracle_contexts = load_oracle_cache(oracle_cache_dir, item["repo"])
+            if oracle_contexts:
+                oracle_code = lookup_oracle_context(oracle_contexts, item.get("metadata", {}))
+                if oracle_code:
+                    if use_compression:
+                        item["prefix"] = augment_prefix_with_compressed_oracle(
+                            item["prefix"], oracle_code, tokenizer, args.max_oracle_tokens,
+                        )
+                    else:
+                        item["prefix"] = augment_prefix_with_oracle(item["prefix"], oracle_code)
+                    n_aug += 1
+        print(f"  Augmented {n_aug}/{len(items)} pairs")
 
     # Group items by repo for per-repo LoRA generation
     repo_items = defaultdict(list)

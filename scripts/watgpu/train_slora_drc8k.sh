@@ -9,18 +9,19 @@
 
 source scripts/watgpu/common.sh
 
-echo "===== Train: Single LoRA + DRC, max_seq=8192 ====="
+echo "===== Train: Single LoRA + DRC v3, max_seq=8192 ====="
 echo "Start: $(date)"
 echo "GPU: $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null)"
 
 python baselines/single_lora/train_single_lora.py \
     --splits-dir "$SPLITS_DIR" \
-    --output-dir "$CKPT_DIR/SINGLE_LORA_DRC8K" \
+    --output-dir "$CKPT_DIR/SINGLE_LORA_DRC_V3_8K" \
     --use-oracle \
     --oracle-cache-dir "$ORACLE_CACHE_DIR" \
     --max-oracle-tokens 6000 \
     --rank 16 --lora-alpha 32 \
     --max-seq-length 8192 \
+    --no-eval \
     --epochs 3 --batch-size 1 --grad-accum 32 --lr 2e-4
 
 echo "Done: $(date)"

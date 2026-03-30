@@ -99,7 +99,8 @@ def main(args):
     text2lora_dir = os.path.join(os.path.dirname(__file__), "..", "..", "text2lora")
     os.chdir(text2lora_dir)
 
-    lora_dirs = get_target_lora_dirs(args.train_ds_names, args.model_dir)
+    oracle_lora_dir = getattr(args, "oracle_lora_dir", None)
+    lora_dirs = get_target_lora_dirs(args.train_ds_names, args.model_dir, oracle_lora_dir=oracle_lora_dir)
 
     lora_dir = list(lora_dirs.values())[0]
     adapter_config_path = f"{lora_dir}/adapter_config.json"

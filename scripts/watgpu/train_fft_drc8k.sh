@@ -9,17 +9,18 @@
 
 source scripts/watgpu/common.sh
 
-echo "===== Train: FFT + DRC, max_seq=8192 ====="
+echo "===== Train: FFT + DRC v3, max_seq=8192 ====="
 echo "Start: $(date)"
 echo "GPU: $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null)"
 
 python baselines/finetuned/train_finetuned.py \
     --splits-dir "$SPLITS_DIR" \
-    --output-dir "$CKPT_DIR/FFT_DRC8K" \
+    --output-dir "$CKPT_DIR/FFT_DRC_V3_8K" \
     --use-oracle \
     --oracle-cache-dir "$ORACLE_CACHE_DIR" \
     --max-oracle-tokens 6000 \
     --max-seq-length 8192 \
+    --no-eval \
     --epochs 3 --batch-size 1 --grad-accum 32 --lr 2e-5
 
 echo "Done: $(date)"
