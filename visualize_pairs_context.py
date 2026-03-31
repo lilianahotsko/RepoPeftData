@@ -5,6 +5,8 @@ Visualize QnA pairs with all context sources:
   - Oracle context (import-resolved definitions)
   - RAG retrieved chunks (k=3, 5, 10)
   - ICL few-shot examples (3-shot, 5-shot)
+  - Text2LoRA text-conditioned descriptions
+  - Text2LoRA code-conditioned embeddings
 
 Produces an interactive HTML report for inspecting what each baseline actually sees.
 
@@ -17,6 +19,7 @@ Usage:
 import argparse
 import html as html_mod
 import json
+import math
 import os
 import sys
 from pathlib import Path
@@ -72,6 +75,38 @@ def get_oracle_context(oracle_cache_dir, repo_name, metadata):
     if entry:
         return entry.get("extracted_code", "")
     return None
+
+
+def get_text2lora_text_descriptions(text2lora_dir, repo_name):
+    """Load text descriptions for a repo from text2lora tasks."""
+    slug = repo_name.replace("/", "__")
+    meta_path = text2lora_dir / "tasks" / slug / "metadata.yaml"
+    if not meta_path.exists():
+        return None
+    try:
+        import yaml
+        meta = yaml.safe_load(meta_path.read_text(encoding="utf-8"))
+        return meta.get("descriptions", [])
+    except Exception:
+        return None
+
+
+def get_text2lora_code_embedding_info(embedding):
+    """Summarize the code embedding vector (used by text2lora code-conditioned)."""
+    if embedding is None or len(embedding) == 0:
+        return None
+    dim = len(embedding)
+    norm = math.sqrt(sum(x * x for x in embedding))
+    top_indices = sorted(range(dim), key=lambda i: abs(embedding[i]), reverse=True)[:10]
+    top_vals = [(i, embedding[i]) for i in top_indices]
+    return {
+        "dim": dim,
+        "norm": norm,
+        "min": min(embedding),
+        "max": max(embedding),
+        "mean": sum(embedding) / dim,
+        "top_magnitude": top_vals,
+    }
 
 
 def get_rag_chunks(rag_cache_dir, repo_name, prefix, embed_model, embed_tokenizer, device, top_k_list=(3, 5, 10)):
@@ -211,6 +246,8 @@ def generate_html(items_with_context, split_name, stats):
         oracle_code = item.get("oracle_context") or ""
         rag_chunks = item.get("rag_chunks", {})
         icl_examples = item.get("icl_examples", {})
+        t2l_text_descs = item.get("t2l_text_descriptions") or []
+        t2l_code_info = item.get("t2l_code_embedding_info")
         file_name = meta.get("file", "")
         lineno = meta.get("lineno", "?")
 
@@ -300,6 +337,48 @@ def generate_html(items_with_context, split_name, stats):
             else:
                 icl_section += f'<div class="context-block icl-block"><div class="ctx-label icl-label">ICL {n}-shot</div><p class="no-data">No examples found</p></div>'
 
+        t2l_text_section = ""
+        if t2l_text_descs:
+            desc_html = ""
+            for di, desc in enumerate(t2l_text_descs):
+                desc_html += f'<div class="chunk"><div class="chunk-num">Variant {di+1}/{len(t2l_text_descs)}</div><pre><code>{esc(desc)}</code></pre></div>'
+            t2l_text_section = f"""
+            <div class="context-block t2l-text-block">
+              <div class="ctx-label t2l-text-label">TEXT2LORA TEXT DESCRIPTIONS ({len(t2l_text_descs)} variants)</div>
+              <p style="color: var(--text-dim); font-size: 0.83em; margin-bottom: 8px;">
+                Text2LoRA text-conditioned: the hypernetwork receives one of these descriptions
+                (embedded via GTE-large) to predict LoRA weights for this repo.
+              </p>
+              {desc_html}
+            </div>"""
+        else:
+            t2l_text_section = '<div class="context-block t2l-text-block"><div class="ctx-label t2l-text-label">TEXT2LORA TEXT DESCRIPTIONS</div><p class="no-data">No descriptions available for this repo</p></div>'
+
+        t2l_code_section = ""
+        if t2l_code_info:
+            stats_html = f"""<table class="emb-stats">
+              <tr><td>Dimension</td><td>{t2l_code_info['dim']}</td></tr>
+              <tr><td>L2 Norm</td><td>{t2l_code_info['norm']:.4f}</td></tr>
+              <tr><td>Min / Max</td><td>{t2l_code_info['min']:.6f} / {t2l_code_info['max']:.6f}</td></tr>
+              <tr><td>Mean</td><td>{t2l_code_info['mean']:.6f}</td></tr>
+            </table>"""
+            top_html = "<div class='chunk'><div class='chunk-num'>Top-10 dimensions by magnitude</div><pre><code>"
+            for idx, val in t2l_code_info['top_magnitude']:
+                top_html += f"dim[{idx:4d}] = {val:+.6f}\n"
+            top_html += "</code></pre></div>"
+            t2l_code_section = f"""
+            <div class="context-block t2l-code-block">
+              <div class="ctx-label t2l-code-label">TEXT2LORA CODE EMBEDDING (Qwen3-Embedding, {t2l_code_info['dim']}-dim)</div>
+              <p style="color: var(--text-dim); font-size: 0.83em; margin-bottom: 8px;">
+                Text2LoRA code-conditioned: the hypernetwork receives this pre-computed code embedding
+                (mean-pooled over repo code chunks) to predict LoRA weights.
+              </p>
+              {stats_html}
+              {top_html}
+            </div>"""
+        else:
+            t2l_code_section = '<div class="context-block t2l-code-block"><div class="ctx-label t2l-code-label">TEXT2LORA CODE EMBEDDING</div><p class="no-data">No code embedding available for this repo</p></div>'
+
         card = f"""
         <div class="card" data-repo="{esc(repo)}" data-idx="{i}">
           <div class="card-header" onclick="toggleCard(this)">
@@ -331,10 +410,14 @@ def generate_html(items_with_context, split_name, stats):
               <button class="tab active" onclick="showTab(this,'oracle-{i}')">Oracle</button>
               <button class="tab" onclick="showTab(this,'rag-{i}')">RAG</button>
               <button class="tab" onclick="showTab(this,'icl-{i}')">ICL</button>
+              <button class="tab" onclick="showTab(this,'t2l-text-{i}')">T2L Text</button>
+              <button class="tab" onclick="showTab(this,'t2l-code-{i}')">T2L Code</button>
             </div>
             <div class="tab-content" id="oracle-{i}">{oracle_section}</div>
             <div class="tab-content" id="rag-{i}" style="display:none;">{rag_section}</div>
             <div class="tab-content" id="icl-{i}" style="display:none;">{icl_section}</div>
+            <div class="tab-content" id="t2l-text-{i}" style="display:none;">{t2l_text_section}</div>
+            <div class="tab-content" id="t2l-code-{i}" style="display:none;">{t2l_code_section}</div>
           </div>
         </div>"""
         cards.append(card)
@@ -415,6 +498,13 @@ def generate_html(items_with_context, split_name, stats):
   .oracle-block pre {{ border-left: 3px solid var(--oracle-color); }}
   .rag-block pre {{ border-left: 3px solid var(--rag-color); }}
   .icl-block pre {{ border-left: 3px solid var(--icl-color); }}
+  .t2l-text-block pre {{ border-left: 3px solid #79c0ff; }}
+  .t2l-code-block pre {{ border-left: 3px solid #ffa657; }}
+  .t2l-text-label {{ color: #79c0ff; }}
+  .t2l-code-label {{ color: #ffa657; }}
+  .emb-stats {{ border-collapse: collapse; margin: 8px 0; font-size: 0.85em; }}
+  .emb-stats td {{ padding: 3px 12px 3px 0; color: var(--text); }}
+  .emb-stats td:first-child {{ color: var(--text-dim); }}
 
   .chunk {{ margin-bottom: 10px; }}
   .chunk-num {{ font-size: 0.78em; color: var(--text-dim); margin-bottom: 3px; }}
@@ -496,6 +586,8 @@ def main():
     ap.add_argument("--rag-cache-dir", type=str, default=default_rag)
     ap.add_argument("--limit", type=int, default=50)
     ap.add_argument("--limit-repos", type=int, default=None)
+    ap.add_argument("--text2lora-dir", type=str, default="text2lora",
+                    help="Path to text2lora/ repo root (for task descriptions)")
     ap.add_argument("--no-embed", action="store_true", help="Skip RAG/ICL retrieval (no GPU needed)")
     ap.add_argument("--embed-model", type=str, default="Qwen/Qwen3-Embedding-0.6B")
     ap.add_argument("-o", "--output", type=str, default=None)
@@ -504,6 +596,7 @@ def main():
     splits_dir = Path(args.splits_dir).expanduser().resolve()
     oracle_cache_dir = Path(args.oracle_cache_dir).expanduser().resolve()
     rag_cache_dir = Path(args.rag_cache_dir).expanduser().resolve()
+    text2lora_dir = Path(args.text2lora_dir).expanduser().resolve()
 
     print(f"Loading split: {args.split} from {splits_dir}")
     items, _ = load_split_items(splits_dir, args.split, limit_repos=args.limit_repos, limit=args.limit)
@@ -536,6 +629,11 @@ def main():
         item["oracle_context"] = oc
         if oc:
             n_with_oracle += 1
+
+        item["t2l_text_descriptions"] = get_text2lora_text_descriptions(
+            text2lora_dir, item["repo"])
+        item["t2l_code_embedding_info"] = get_text2lora_code_embedding_info(
+            item.get("embedding"))
 
         if not args.no_embed and rag_cache_dir.exists():
             item["rag_chunks"] = get_rag_chunks(
