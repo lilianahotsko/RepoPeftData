@@ -182,6 +182,15 @@ def pool_file_embeddings(chunk_embs: torch.Tensor) -> Optional[torch.Tensor]:
     return chunk_embs.mean(dim=0)
 
 
+def pool_file_embeddings_maxmean(chunk_embs: torch.Tensor) -> Optional[torch.Tensor]:
+    """chunk_embs [K, D] -> file_emb [2*D] via concat(MaxPool, MeanPool)."""
+    if chunk_embs.numel() == 0:
+        return None
+    mean_pool = chunk_embs.mean(dim=0)
+    max_pool = chunk_embs.max(dim=0).values
+    return torch.cat([max_pool, mean_pool], dim=-1)
+
+
 def _path_bonus(rel_path: str) -> float:
     """Small additive bias to file score based on path heuristics."""
     p = rel_path.replace("\\", "/").lower()
