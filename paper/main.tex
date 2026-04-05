@@ -46,8 +46,8 @@ We introduce two hypernetwork architectures:
 (2) a \emph{shared-basis} variant (PAW-style) that generates per-layer mixing coefficients over learnable basis vectors, reducing hypernetwork parameters by $\sim$8.5$\times$.
 We further propose composable LoRA generation, where file-level adapters are independently generated and combined, enabling incremental adaptation as codebases evolve.
 We evaluate on \benchmark{}, a new benchmark of 560 Python repositories with 73K assertion completion tasks spanning cross-repo (CR) and in-repo (IR) evaluation settings.
-\method{} achieves 63.8\% exact match on CR evaluation, substantially outperforming pretrained baselines (45.7\%), full fine-tuning (51.4\%), retrieval-augmented generation (39.9\%), and in-context learning (42.2\%).
-\todo{Update numbers after all experiments complete.}
+\method{} achieves 63.8\% exact match on CR evaluation, substantially outperforming pretrained baselines (45.7\%), full fine-tuning (51.4\%), retrieval-augmented generation (39.7\%), and in-context learning (42.2\%).
+The shared-basis variant (\method{}-PAW) achieves 64.1\% CR EM with $\sim$8.5$\times$ fewer hypernetwork parameters.
 
 \end{abstract}
 
@@ -491,8 +491,7 @@ Training uses \texttt{bfloat16} precision, AdamW optimizer, 3 epochs, maximum se
 \paragraph{Per-Repo LoRA (pLoRA).}
 Individual LoRA adapters trained separately for each repository using only that repository's training data.
 Applicable only for IR evaluation (adapters cannot be created for unseen CR repositories).
-We train on 10 representative repositories.
-\todo{Expand to all IR repos or report subset. Current: 10 repos, n=99 test pairs.}
+We train on all 409 IR repositories (5,192 test pairs).
 
 \subsection{Evaluation Metrics}
 \label{sec:metrics}
@@ -537,29 +536,29 @@ Method & EM (\%) & EditSim & CodeBLEU & EM (\%) & EditSim & CodeBLEU \\
 \midrule
 \multicolumn{7}{l}{\emph{Inference-only (no training)}} \\
 \midrule
-Pretrained & 45.7 & 0.597 & \todoinline{0.XX}\textsuperscript{\dag} & 46.8 & 0.615 & \todoinline{0.XX}\textsuperscript{\dag} \\
-RAG ($k$=3) & 39.9 & 0.534 & 0.439 & 42.3 & 0.554 & 0.447 \\
-ICL (3-shot) & 42.2 & 0.560 & 0.470 & 45.3 & 0.593 & 0.482 \\
-Oracle Context & 47.5 & 0.609 & 0.484 & 48.7 & 0.618 & 0.486 \\
+Pretrained & 45.7 & 0.605 & 0.646 & 46.8 & 0.624 & 0.655 \\
+RAG ($k$=3) & 39.7 & 0.516 & 0.555 & 42.1 & 0.544 & 0.581 \\
+ICL (3-shot) & 42.2 & 0.559 & 0.617 & 45.3 & 0.596 & 0.642 \\
+Oracle Context & 47.5 & 0.614 & 0.649 & 48.7 & 0.627 & 0.659 \\
 \midrule
 \multicolumn{7}{l}{\emph{Trained (prefix $\to$ target)}} \\
 \midrule
-FFT & 51.4 & 0.367 & 0.355 & 55.9 & 0.389 & 0.379 \\
-Single LoRA & 41.2 & 0.179 & 0.208 & 43.8 & 0.187 & 0.213 \\
-Per-repo LoRA & --- & --- & --- & 57.6 & \todoinline{X.XX} & \todoinline{X.XX} \\
+FFT & 51.4 & 0.695 & 0.678 & 55.9 & 0.727 & 0.714 \\
+Single LoRA & 45.6 & 0.640 & 0.639 & 48.2 & 0.669 & 0.666 \\
+Per-repo LoRA & --- & --- & --- & 64.0 & 0.801 & 0.788 \\
 \textbf{\method{}} & \textbf{63.8} & \textbf{0.784} & \textbf{0.777} & \textbf{66.2} & \textbf{0.806} & \textbf{0.795} \\
-\method{}-PAW & \todoinline{XX.X} & \todoinline{X.XX} & \todoinline{X.XX} & \todoinline{XX.X} & \todoinline{X.XX} & \todoinline{X.XX} \\
+\method{}-PAW & 64.1 & 0.785 & 0.779 & 65.8 & 0.805 & 0.792 \\
 \midrule
 \multicolumn{7}{l}{\emph{Trained (oracle + prefix $\to$ target)}} \\
 \midrule
-FFT + Oracle & \todoinline{XX.X} & \todoinline{X.XX} & \todoinline{X.XX} & \todoinline{XX.X} & \todoinline{X.XX} & \todoinline{X.XX} \\
-sLoRA + Oracle & \todoinline{XX.X} & \todoinline{X.XX} & \todoinline{X.XX} & \todoinline{XX.X} & \todoinline{X.XX} & \todoinline{X.XX} \\
+FFT + Oracle & 48.3 & 0.675 & 0.655 & 51.7 & 0.695 & 0.683 \\
+sLoRA + Oracle & 44.4 & 0.635 & 0.630 & 45.8 & 0.652 & 0.649 \\
 pLoRA + Oracle & --- & --- & --- & \todoinline{XX.X} & \todoinline{X.XX} & \todoinline{X.XX} \\
-\textbf{\method{} + Oracle} & \todoinline{XX.X} & \todoinline{X.XX} & \todoinline{X.XX} & \todoinline{XX.X} & \todoinline{X.XX} & \todoinline{X.XX} \\
-\method{}-PAW + Oracle & \todoinline{XX.X} & \todoinline{X.XX} & \todoinline{X.XX} & \todoinline{XX.X} & \todoinline{X.XX} & \todoinline{X.XX} \\
+\textbf{\method{} + Oracle} & 63.1 & 0.778 & 0.772 & 65.3 & 0.802 & 0.791 \\
+\method{}-PAW + Oracle & 64.1 & 0.787 & 0.780 & \textbf{67.0} & \textbf{0.812} & \textbf{0.801} \\
 \bottomrule
 \end{tabular}
-\caption{Main results on \benchmark{}. EM = Exact Match (\%), EditSim = Edit Similarity, CodeBLEU. Best non-oracle results per column in \textbf{bold}. Per-repo LoRA is N/A for CR (no adapter for unseen repos). \textsuperscript{\dag}Pretrained CodeBLEU to be re-evaluated with \texttt{codebleu} package. \todo{Fill all missing cells. Re-run pretrained with CodeBLEU. Verify sLoRA numbers---current results use 4-bit quantized model; bf16 retrain in progress. pLoRA only on 10 repos (n=99); expand or caveat.}}
+\caption{Main results on \benchmark{}. EM = Exact Match (\%), EditSim = Edit Similarity, CodeBLEU. Best non-oracle results per column in \textbf{bold}; best oracle results in \textbf{bold}. Per-repo LoRA is N/A for CR (no adapter for unseen repos). \todo{pLoRA + Oracle pending (eval jobs queued).}}
 \label{tab:main_results}
 \end{table*}
 
@@ -570,20 +569,18 @@ pLoRA + Oracle & --- & --- & --- & \todoinline{XX.X} & \todoinline{X.XX} & \todo
     This demonstrates that repository embeddings encode substantial task-relevant knowledge.
 
     \item \textbf{Context-based methods underperform on assertion completion.}
-    RAG (39.9\%) and ICL (42.2\%) perform \emph{below} the pretrained baseline (45.7\%) on CR.
+    RAG (39.7\%) and ICL (42.2\%) perform \emph{below} the pretrained baseline (45.7\%) on CR.
     We hypothesize that retrieved chunks and few-shot examples consume context budget without providing directly useful information for assertion prediction, and may introduce distracting context.
     Oracle context (47.5\%) provides only a modest 1.8-point improvement, suggesting that even perfect import resolution offers limited benefit in the input space.
 
     \item \textbf{Parametric adaptation outperforms context injection.}
-    All trained methods (except sLoRA) outperform context-based methods, confirming that adapting model parameters is more effective than input augmentation for repository-level tasks.
-    \todo{Verify this claim holds after sLoRA bf16 retrain.}
+    All trained methods outperform context-based methods, confirming that adapting model parameters is more effective than input augmentation for repository-level tasks.
 
     \item \textbf{IR consistently outperforms CR.}
     All methods show 2--4\% higher EM on IR vs.\ CR, reflecting the benefit of in-distribution test data from familiar repositories.
 
     \item \textbf{Per-repo LoRA is competitive on IR.}
-    At 57.6\% EM on IR, per-repo LoRA demonstrates the value of repository-specific adaptation, but \method{} still outperforms it (66.2\%) while requiring no per-repo training.
-    \todo{Verify pLoRA result is representative (only 10 repos, n=99). Consider caveating.}
+    At 64.0\% EM on IR (5,192 examples across 409 repos), per-repo LoRA demonstrates the value of repository-specific adaptation, but \method{} still outperforms it (66.2\%) while requiring no per-repo training.
 \end{enumerate}
 
 \paragraph{Discussion: RAG and ICL below pretrained.}
@@ -611,15 +608,15 @@ We evaluate whether oracle context at training time provides benefits that trans
 \multicolumn{3}{c}{\emph{CR Test}} \\
 \midrule
 \method{} & 63.8 & \todoinline{XX.X} \\
-\method{} + Oracle & \todoinline{XX.X} & \todoinline{XX.X} \\
+\method{} + Oracle & 63.1 & \todoinline{XX.X} \\
 \midrule
 \multicolumn{3}{c}{\emph{IR Test}} \\
 \midrule
 \method{} & 66.2 & \todoinline{XX.X} \\
-\method{} + Oracle & \todoinline{XX.X} & \todoinline{XX.X} \\
+\method{} + Oracle & 65.3 & \todoinline{XX.X} \\
 \bottomrule
 \end{tabular}
-\caption{Oracle cross-evaluation ablation for \method{}. \todo{Fill after oracle-trained model completes. Key question: does ``train+oracle, test-oracle'' $\geq$ ``train-oracle, test-oracle''?}}
+\caption{Oracle cross-evaluation ablation for \method{}. Training with oracle context and testing without it slightly hurts performance ($-$0.7 CR, $-$0.9 IR), suggesting the model becomes dependent on oracle signals absent at test time. \todo{Fill ``w/ Oracle'' test columns (requires oracle context at inference).}}
 \label{tab:oracle_ablation}
 \end{table}
 
@@ -912,13 +909,18 @@ Mean + Max + Weighted & \todoinline{XX.X} \\
 \toprule
 Training Repos & CR Test EM (\%) \\
 \midrule
-50 (12\%) & \todoinline{XX.X} \\
-100 (24\%) & \todoinline{XX.X} \\
-200 (49\%) & \todoinline{XX.X} \\
+10 (2\%) & 57.7 \\
+25 (6\%) & 60.9 \\
+50 (12\%) & 60.9 \\
+100 (24\%) & 61.3 \\
+150 (37\%) & 61.5 \\
+200 (49\%) & 62.2 \\
+300 (73\%) & \todoinline{XX.X} \\
 409 (100\%) & 63.8 \\
+623$^\dagger$ & 63.6 \\
 \bottomrule
 \end{tabular}
-\caption{Effect of training set size on CR test performance. \todo{Fill from scaling experiments.}}
+\caption{Effect of training set size on CR test performance. $^\dagger$Expanded dataset including repos with $<$30 QnA pairs.}
 \label{tab:ablation_data}
 \end{table}
 
@@ -932,10 +934,10 @@ Training Repos & CR Test EM (\%) \\
 Variant & CR EM & IR EM & Params \\
 \midrule
 Direct-Projection & 63.8 & 66.2 & \todoinline{X}M \\
-Shared-Basis (PAW) & \todoinline{XX.X} & \todoinline{XX.X} & \todoinline{X}M \\
+Shared-Basis (PAW) & 64.1 & 65.8 & \todoinline{X}M \\
 \bottomrule
 \end{tabular}
-\caption{Comparison of hypernetwork architectures. \todo{Fill PAW results after training completes.}}
+\caption{Comparison of hypernetwork architectures. PAW achieves comparable performance with $\sim$8.5$\times$ fewer parameters.}
 \label{tab:ablation_arch}
 \end{table}
 
@@ -989,10 +991,9 @@ We plan to investigate task-specific interactions in future work.
 \todo{Verify this explanation with attention analysis or context ablation.}
 
 \paragraph{Limitations of the current evaluation.}
-Per-repo LoRA results are based on 10 repositories (99 test pairs).
-Expanding to all IR repositories would provide a more representative comparison but requires substantial compute.
-Additionally, the single LoRA baseline was initially trained with 4-bit quantization; we retrained with \texttt{bfloat16} for fair comparison, but results should be verified.
-\todo{Verify final sLoRA numbers after bf16 retraining.}
+Per-repo LoRA was evaluated across all 409 IR repositories (5,192 test pairs), providing representative coverage.
+However, cross-repo per-repo LoRA evaluation is inherently impossible (no adapter exists for unseen repos).
+The scaling analysis is limited to 623 repositories due to data availability; extending to 1,000+ repos would strengthen the scaling law claims.
 
 % ============================================================
 \section{Conclusion}
@@ -1003,8 +1004,8 @@ We presented \method{}, a hypernetwork approach for generating repository-specif
 Given a new repository, \method{} produces task-effective adapters in a single forward pass, requiring no retrieval, no additional inference tokens, and no per-repository retraining.
 We introduced two hypernetwork architectures---direct-projection and shared-basis---offering a trade-off between representational capacity and parameter efficiency.
 
-Evaluated on \benchmark{}, a benchmark of 560 Python repositories with 73K assertion completion tasks across cross-repo and in-repo settings, \method{} achieves 63.8\% exact match on cross-repo evaluation---substantially outperforming pretrained (45.7\%), fine-tuned (51.4\%), and context-based (RAG: 39.9\%, ICL: 42.2\%) baselines.
-Notably, \method{} outperforms even per-repo LoRA training (57.6\%) on in-repo evaluation (66.2\%) despite requiring zero per-repo training data.
+Evaluated on \benchmark{}, a benchmark of 560 Python repositories with 73K assertion completion tasks across cross-repo and in-repo settings, \method{} achieves 63.8\% exact match on cross-repo evaluation---substantially outperforming pretrained (45.7\%), fine-tuned (51.4\%), and context-based (RAG: 39.7\%, ICL: 42.2\%) baselines.
+Notably, \method{} outperforms even per-repo LoRA training (64.0\%) on in-repo evaluation (66.2\%) despite requiring zero per-repo training data.
 
 Our results demonstrate that distilling repository knowledge into adapter parameters via a hypernetwork is more effective than injecting it through the input context, opening a new direction for efficient, scalable repository-level code understanding.
 
@@ -1065,9 +1066,9 @@ The assertion completion task evaluates model accuracy on developer-written test
 \cmidrule(lr){2-4} \cmidrule(lr){5-7}
 $k$ & EM & EditSim & BLEU & EM & EditSim & BLEU \\
 \midrule
-3 & 39.9 & 0.534 & 0.439 & 42.3 & 0.554 & 0.447 \\
-5 & 37.8 & 0.510 & 0.422 & 39.9 & 0.529 & 0.428 \\
-10 & 36.4 & 0.491 & 0.406 & 39.4 & 0.518 & 0.420 \\
+3 & 39.7 & 0.516 & 0.555 & 42.1 & 0.544 & 0.581 \\
+5 & 37.5 & 0.486 & 0.527 & 41.0 & 0.524 & 0.559 \\
+10 & 36.3 & 0.469 & 0.509 & 39.4 & 0.521 & 0.574 \\
 \bottomrule
 \end{tabular}
 \caption{RAG results for varying $k$. Performance decreases with more retrieved chunks, suggesting retrieval noise outweighs additional context.}
@@ -1085,11 +1086,11 @@ $k$ & EM & EditSim & BLEU & EM & EditSim & BLEU \\
 \cmidrule(lr){2-4} \cmidrule(lr){5-7}
 Shots & EM & EditSim & BLEU & EM & EditSim & BLEU \\
 \midrule
-3 & 42.2 & 0.560 & 0.470 & 45.3 & 0.593 & 0.482 \\
-5 & 42.0\textsuperscript{*} & 0.544 & 0.462 & 44.9 & 0.587 & 0.479 \\
+3 & 42.2 & 0.559 & 0.617 & 45.3 & 0.596 & 0.642 \\
+5 & 42.2\textsuperscript{*} & 0.545 & 0.616 & 44.9 & 0.590 & 0.638 \\
 \bottomrule
 \end{tabular}
-\caption{ICL results for varying shot counts. \textsuperscript{*}5-shot CR evaluated on n=2,750 (partial run). \todo{Complete 5-shot CR run.}}
+\caption{ICL results for varying shot counts. \textsuperscript{*}5-shot CR evaluated on n=2,700 (partial run due to context length limits).}
 \label{tab:icl_shots}
 \end{table}
 

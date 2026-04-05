@@ -484,3 +484,17 @@ def __getattr__(attr: str) -> type[BrokenWorkerInterpreter]:
 | anyio `DeprecatedClass is` | Typo alias, no way to know correct name | Sees `__getattr__` mapping to `BrokenWorkerInterpreter` | Deprecation alias mapping visible |
 
 
+
+
++ text2lora variant
++ text2 lora and doc2lora archytecture details (in related works) 
++ explain difference between the results (why code2lora is better than text2lora L variant with our embedding)
++ for a long file - create separate loras and apply sequentially (incrementally compute the pooling of the embedding to compute the new weighted average) 
+
++ in the loop: adding the new files after each commit (befre the ml trunk) 
++ split 80/20 commits instead of the 80/20 test 
+
+
+repository: 80(train)-20(test set)(cr)
+
+test file level: train 80% -> 80(train)/20 (test)(ir) 
