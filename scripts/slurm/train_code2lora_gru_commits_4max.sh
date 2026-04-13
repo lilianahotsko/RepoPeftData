@@ -14,7 +14,7 @@ mkdir -p slurm_logs
 DB_PATH="${DB_PATH:-$SPLITS_DIR/commits_assertions.db}"
 SUFFIX="${SUFFIX:-default}"
 # Cap training repos (first N from train split). Unset or empty = use all.
-LIMIT_TRAIN_REPOS="${LIMIT_TRAIN_REPOS:-}"
+LIMIT_TRAIN_REPOS=10
 OUT_DIR="$CKPT_DIR/CODE2LORA_GRU/commit_level_${SUFFIX}"
 
 echo "===== Train: Code2LoRA-GRU (commit-level, diff-based) ====="

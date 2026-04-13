@@ -441,7 +441,7 @@ def train_commit_sequential(
         epoch_loss = 0.0
         epoch_repos = 0
         epoch_commits_with_loss = 0
-        accum_loss = torch.tensor(0.0, device=device)
+        accum_loss_val = 0.0
         accum_count = 0
         t0 = time.time()
 
@@ -486,7 +486,8 @@ def train_commit_sequential(
                 remove_lora_hooks(hooks)
 
                 if loss is not None:
-                    accum_loss = accum_loss + loss
+                    loss.backward()
+                    accum_loss_val += loss.item()
                     accum_count += 1
                     repo_loss_val += loss.item()
                     repo_loss_n += 1
@@ -499,8 +500,9 @@ def train_commit_sequential(
                 epoch_commits_with_loss += repo_loss_n
 
             if accum_count > 0 and (ri + 1) % args.grad_accum == 0:
-                mean_loss = accum_loss / accum_count
-                mean_loss.backward()
+                for p in code2lora_gru.parameters():
+                    if p.grad is not None:
+                        p.grad /= accum_count
 
                 if args.max_grad_norm > 0:
                     grad_norm = torch.nn.utils.clip_grad_norm_(
@@ -517,7 +519,7 @@ def train_commit_sequential(
                 global_step += 1
 
                 if global_step % args.logging_steps == 0:
-                    avg = accum_loss.item() / accum_count
+                    avg = accum_loss_val / accum_count
                     elapsed = time.time() - t0
                     lr_now = optimizer.param_groups[0]["lr"]
                     print(
@@ -535,7 +537,7 @@ def train_commit_sequential(
                         "train/global_step": global_step,
                     }, step=global_step)
 
-                accum_loss = torch.tensor(0.0, device=device)
+                accum_loss_val = 0.0
                 accum_count = 0
 
             if (
@@ -586,8 +588,9 @@ def train_commit_sequential(
 
         # flush remaining accumulated gradients at end of epoch
         if accum_count > 0:
-            mean_loss = accum_loss / accum_count
-            mean_loss.backward()
+            for p in code2lora_gru.parameters():
+                if p.grad is not None:
+                    p.grad /= accum_count
             if args.max_grad_norm > 0:
                 torch.nn.utils.clip_grad_norm_(
                     code2lora_gru.parameters(), args.max_grad_norm,
@@ -597,7 +600,7 @@ def train_commit_sequential(
                 scheduler.step()
             optimizer.zero_grad()
             global_step += 1
-            accum_loss = torch.tensor(0.0, device=device)
+            accum_loss_val = 0.0
             accum_count = 0
 
         epoch_avg_loss = epoch_loss / max(epoch_repos, 1)
