@@ -6,22 +6,24 @@ D2L uses a context encoder + Perceiver + HyperLoRA to generate adapter weights
 from a document. We internalize oracle context (DRC) for each repo, then use
 the adapted model for assertion completion.
 
-Note: D2L's base model is Gemma-2-2B-IT (not Qwen), so this baseline measures
-the D2L method with its native architecture.
+Supports both the pretrained Gemma-based SakanaAI checkpoint and custom-trained
+Qwen-based checkpoints (via --base-model override).
 
 Usage:
+    # Pretrained Gemma checkpoint:
     python baselines/doc2lora/evaluate_doc2lora.py \
         --checkpoint-path doc2lora/trained_d2l/gemma_demo/checkpoint-80000/pytorch_model.bin \
         --split cr_test \
         --output $SCRATCH/BASELINES/doc2lora_cr_test.json
 
-    # With oracle context:
+    # Trained Qwen checkpoint (with oracle context):
     python baselines/doc2lora/evaluate_doc2lora.py \
-        --checkpoint-path doc2lora/trained_d2l/gemma_demo/checkpoint-80000/pytorch_model.bin \
+        --checkpoint-path $SCRATCH/TRAINING_CHECKPOINTS/DOC2LORA_QWEN/checkpoint-XXXX/pytorch_model.bin \
+        --base-model Qwen/Qwen2.5-Coder-1.5B \
         --split cr_test \
         --use-oracle \
         --oracle-cache-dir $SCRATCH/ORACLE_CONTEXT_CACHE_V4 \
-        --output $SCRATCH/BASELINES/doc2lora_drc_v4_cr_test.json
+        --output $SCRATCH/BASELINES/doc2lora_trained_drc_cr_test.json
 """
 
 import argparse
@@ -88,6 +90,9 @@ def main():
     ap = argparse.ArgumentParser(description="Doc-to-LoRA evaluation on RepoPeft")
     ap.add_argument("--checkpoint-path", required=True, type=Path,
                     help="Path to D2L checkpoint (pytorch_model.bin)")
+    ap.add_argument("--base-model", type=str, default=None,
+                    help="Override base model name (e.g. Qwen/Qwen2.5-Coder-1.5B). "
+                         "If not set, uses the model name embedded in the checkpoint.")
     ap.add_argument("--split", default="cr_test")
     ap.add_argument("--splits-dir", type=str, default=get_default_splits_dir())
     ap.add_argument("--output", required=True, type=Path)
@@ -109,6 +114,11 @@ def main():
     # ── Load D2L model ───────────────────────────────────────────────────────
     print(f"Loading D2L checkpoint: {args.checkpoint_path}")
     state_dict = torch.load(str(args.checkpoint_path), map_location=device, weights_only=False)
+
+    if args.base_model:
+        state_dict["base_model_name_or_path"] = args.base_model
+        print(f"Using base model override: {args.base_model}")
+
     model = ModulatedPretrainedModel.from_state_dict(
         state_dict, train=False, use_sequence_packing=False
     )

@@ -496,6 +496,37 @@ class Code2LoRAGRU(nn.Module):
             device=device, dtype=dtype,
         )
 
+    def encode_repository_commit(
+        self,
+        diff_embedding: torch.Tensor,
+        h_prev: torch.Tensor,
+    ) -> torch.Tensor:
+        """Process a single commit's diff embedding and return updated hidden state.
+
+        Args:
+            diff_embedding: [B, file_embed_dim] pooled diff embedding for one commit.
+            h_prev:         [num_layers, B, H] hidden state from the previous commit.
+
+        Returns:
+            h_new: [num_layers, B, H] updated hidden state (pass to next commit).
+        """
+        return self.gru.forward_streaming(diff_embedding, h_prev)
+
+    def generate_lora_from_h(self, h: torch.Tensor) -> Optional[Dict]:
+        """Generate LoRA parameters from a multi-layer hidden state.
+
+        Args:
+            h: [num_layers, B, H] GRU hidden state.
+
+        Returns:
+            {(layer_idx, module_name): (A, B)} or None if no generator.
+        """
+        if self.lora_generator is None:
+            return None
+        h_out = self.gru.output_norm(h[-1])  # [B, H]
+        return self.lora_generator(h_out)
+
+
     def encode_repository(
         self,
         file_embeddings: torch.Tensor,
@@ -573,6 +604,7 @@ class Code2LoRAGRU(nn.Module):
             device=file_embeddings.device,
             dtype=file_embeddings.dtype,
         )
+
 
         h_final = self.encode_repository(file_embeddings, h_0, file_lengths)
 

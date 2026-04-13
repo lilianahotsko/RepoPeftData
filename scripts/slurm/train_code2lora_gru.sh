@@ -2,7 +2,7 @@
 #SBATCH --job-name=train_gru
 #SBATCH --output=slurm_logs/train_gru_%j.out
 #SBATCH --error=slurm_logs/train_gru_%j.err
-#SBATCH --time=24:00:00
+#SBATCH --time=5:00:00
 #SBATCH --gres=gpu:h100:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=80G

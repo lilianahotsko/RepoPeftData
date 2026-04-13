@@ -498,3 +498,9 @@ def __getattr__(attr: str) -> type[BrokenWorkerInterpreter]:
 repository: 80(train)-20(test set)(cr)
 
 test file level: train 80% -> 80(train)/20 (test)(ir) 
+
+
+- for each commit update the gru -> generate LoRA -> compute loss on the current commit -> go to the next commit 
+
+- add the statistics : how many version are in the each versions / how many token are in the diffs 
+

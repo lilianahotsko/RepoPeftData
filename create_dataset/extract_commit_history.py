@@ -27,7 +27,11 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from tqdm import tqdm
+try:
+    from tqdm import tqdm
+except ImportError:  # pragma: no cover
+    def tqdm(iterable, **kwargs):
+        return iterable
 
 SKIP_DIRS = {
     ".git", "__pycache__", ".venv", "venv", "env",
@@ -50,11 +54,11 @@ def _run_git(repo_dir: Path, args: List[str], timeout: int = 120) -> Optional[st
     try:
         result = subprocess.run(
             ["git", "-C", str(repo_dir)] + args,
-            capture_output=True, text=True, timeout=timeout,
+            capture_output=True, timeout=timeout,
         )
         if result.returncode != 0:
             return None
-        return result.stdout
+        return result.stdout.decode("utf-8", errors="replace")
     except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
         return None
 
