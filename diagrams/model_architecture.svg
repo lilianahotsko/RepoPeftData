@@ -1,0 +1,227 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 820" font-family="Segoe UI, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#555"/>
+    </marker>
+    <marker id="arrow-blue" markerWidth="10" markerHeight="7" refX="10" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#2563eb"/>
+    </marker>
+    <linearGradient id="grad-embed" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#dbeafe"/>
+      <stop offset="100%" stop-color="#bfdbfe"/>
+    </linearGradient>
+    <linearGradient id="grad-gru" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#dcfce7"/>
+      <stop offset="100%" stop-color="#bbf7d0"/>
+    </linearGradient>
+    <linearGradient id="grad-init" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#fef3c7"/>
+      <stop offset="100%" stop-color="#fde68a"/>
+    </linearGradient>
+    <linearGradient id="grad-lora" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#fce7f3"/>
+      <stop offset="100%" stop-color="#fbcfe8"/>
+    </linearGradient>
+    <linearGradient id="grad-frozen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#e5e7eb"/>
+      <stop offset="100%" stop-color="#d1d5db"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Title -->
+  <text x="450" y="35" text-anchor="middle" font-size="20" font-weight="bold" fill="#1e293b">Code2LoRA-GRU Model Architecture</text>
+  <text x="450" y="55" text-anchor="middle" font-size="12" fill="#64748b">Hypernetwork that generates repository-specific LoRA adapters from commit diffs</text>
+
+  <!-- ================================================================== -->
+  <!-- Component 1: DiffEmbedder (Frozen Qwen3-Embedding) -->
+  <!-- ================================================================== -->
+  <g transform="translate(50, 80)">
+    <rect x="0" y="0" width="340" height="220" rx="12" fill="url(#grad-embed)" stroke="#3b82f6" stroke-width="2"/>
+    <text x="170" y="24" text-anchor="middle" font-size="14" font-weight="bold" fill="#1e40af">Component 1: Diff Embedder</text>
+    <text x="170" y="42" text-anchor="middle" font-size="10" fill="#3b82f6">(Frozen Qwen3-Embedding-0.6B)</text>
+
+    <!-- Input -->
+    <rect x="20" y="58" width="130" height="36" rx="6" fill="#fff" stroke="#93c5fd" stroke-width="1.5"/>
+    <text x="85" y="77" text-anchor="middle" font-size="11" fill="#1e3a5f">Raw Diff Text</text>
+    <text x="85" y="89" text-anchor="middle" font-size="9" fill="#64748b">production_code_diff</text>
+
+    <!-- Arrow -->
+    <line x1="150" y1="76" x2="188" y2="76" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+    <!-- Chunking -->
+    <rect x="190" y="58" width="130" height="36" rx="6" fill="#fff" stroke="#93c5fd" stroke-width="1.5"/>
+    <text x="255" y="77" text-anchor="middle" font-size="11" fill="#1e3a5f">Chunk Tokenize</text>
+    <text x="255" y="89" text-anchor="middle" font-size="9" fill="#64748b">512 tok, 64 overlap</text>
+
+    <!-- Arrow down -->
+    <line x1="255" y1="94" x2="255" y2="108" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+    <!-- Embed batches -->
+    <rect x="140" y="110" width="180" height="36" rx="6" fill="#fff" stroke="#93c5fd" stroke-width="1.5"/>
+    <text x="230" y="129" text-anchor="middle" font-size="11" fill="#1e3a5f">Qwen3 Encoder (frozen)</text>
+    <text x="230" y="141" text-anchor="middle" font-size="9" fill="#64748b">last_hidden_state -> mean</text>
+
+    <!-- Arrow down -->
+    <line x1="230" y1="146" x2="230" y2="160" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+    <!-- Pooling -->
+    <rect x="100" y="162" width="200" height="36" rx="6" fill="#eff6ff" stroke="#3b82f6" stroke-width="2"/>
+    <text x="200" y="180" text-anchor="middle" font-size="11" font-weight="600" fill="#1e40af">MaxPool || MeanPool</text>
+    <text x="200" y="193" text-anchor="middle" font-size="9" fill="#3b82f6">[K, D] -> [2*D] = [1536]</text>
+  </g>
+
+  <!-- Arrow from Embedder to GRU -->
+  <line x1="220" y1="300" x2="220" y2="330" stroke="#555" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="230" y="320" font-size="10" fill="#555">diff_emb [2D]</text>
+
+  <!-- ================================================================== -->
+  <!-- Component 3: Mamba2/MeanPool Initializer -->
+  <!-- ================================================================== -->
+  <g transform="translate(510, 80)">
+    <rect x="0" y="0" width="340" height="220" rx="12" fill="url(#grad-init)" stroke="#f59e0b" stroke-width="2"/>
+    <text x="170" y="24" text-anchor="middle" font-size="14" font-weight="bold" fill="#92400e">Component 3: Initializer</text>
+    <text x="170" y="42" text-anchor="middle" font-size="10" fill="#b45309">(Mamba2 / MeanPool / Zeros)</text>
+
+    <!-- Preamble input -->
+    <rect x="30" y="58" width="130" height="36" rx="6" fill="#fff" stroke="#fbbf24" stroke-width="1.5"/>
+    <text x="95" y="77" text-anchor="middle" font-size="11" fill="#78350f">Preamble Files</text>
+    <text x="95" y="89" text-anchor="middle" font-size="9" fill="#92400e">[B, T_pre, 2D]</text>
+
+    <!-- Arrow -->
+    <line x1="160" y1="76" x2="188" y2="76" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+    <!-- Linear proj -->
+    <rect x="190" y="58" width="130" height="36" rx="6" fill="#fff" stroke="#fbbf24" stroke-width="1.5"/>
+    <text x="255" y="77" text-anchor="middle" font-size="11" fill="#78350f">Linear + LayerNorm</text>
+    <text x="255" y="89" text-anchor="middle" font-size="9" fill="#92400e">2D -> H</text>
+
+    <!-- Arrow -->
+    <line x1="255" y1="94" x2="255" y2="108" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+    <!-- Mamba2 block -->
+    <rect x="120" y="110" width="200" height="36" rx="6" fill="#fff" stroke="#fbbf24" stroke-width="1.5"/>
+    <text x="220" y="129" text-anchor="middle" font-size="11" fill="#78350f">Mamba2 SSM Block</text>
+    <text x="220" y="141" text-anchor="middle" font-size="9" fill="#92400e">or BiGRU fallback</text>
+
+    <!-- Arrow -->
+    <line x1="220" y1="146" x2="220" y2="160" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+    <!-- Output projection -->
+    <rect x="100" y="162" width="200" height="36" rx="6" fill="#fef3c7" stroke="#f59e0b" stroke-width="2"/>
+    <text x="200" y="180" text-anchor="middle" font-size="11" font-weight="600" fill="#92400e">LayerNorm + Linear</text>
+    <text x="200" y="193" text-anchor="middle" font-size="9" fill="#b45309">-> h_0 [num_layers, B, H]</text>
+  </g>
+
+  <!-- Arrow from Initializer to GRU -->
+  <path d="M 680 300 L 680 350 Q 680 370 660 370 L 510 370" stroke="#f59e0b" stroke-width="2" fill="none" marker-end="url(#arrow)"/>
+  <text x="600" y="320" font-size="10" fill="#b45309">h_0</text>
+
+  <!-- ================================================================== -->
+  <!-- Component 2: Repository GRU -->
+  <!-- ================================================================== -->
+  <g transform="translate(100, 340)">
+    <rect x="0" y="0" width="400" height="160" rx="12" fill="url(#grad-gru)" stroke="#22c55e" stroke-width="2"/>
+    <text x="200" y="24" text-anchor="middle" font-size="14" font-weight="bold" fill="#166534">Component 2: Repository GRU</text>
+    <text x="200" y="42" text-anchor="middle" font-size="10" fill="#16a34a">(Sequential commit processing with streaming forward)</text>
+
+    <!-- Linear proj -->
+    <rect x="20" y="55" width="100" height="40" rx="6" fill="#fff" stroke="#86efac" stroke-width="1.5"/>
+    <text x="70" y="73" text-anchor="middle" font-size="10" fill="#166534">Linear Proj</text>
+    <text x="70" y="85" text-anchor="middle" font-size="9" fill="#16a34a">2D -> H</text>
+
+    <line x1="120" y1="75" x2="138" y2="75" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+    <!-- LayerNorm -->
+    <rect x="140" y="55" width="80" height="40" rx="6" fill="#fff" stroke="#86efac" stroke-width="1.5"/>
+    <text x="180" y="78" text-anchor="middle" font-size="10" fill="#166534">LayerNorm</text>
+
+    <line x1="220" y1="75" x2="238" y2="75" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+    <!-- GRU Cell -->
+    <rect x="240" y="55" width="80" height="40" rx="6" fill="#dcfce7" stroke="#22c55e" stroke-width="2"/>
+    <text x="280" y="73" text-anchor="middle" font-size="11" font-weight="600" fill="#166534">GRU Cell</text>
+    <text x="280" y="85" text-anchor="middle" font-size="9" fill="#16a34a">H=1024</text>
+
+    <line x1="320" y1="75" x2="348" y2="75" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+    <!-- Output Norm -->
+    <rect x="300" y="108" width="80" height="35" rx="6" fill="#dcfce7" stroke="#22c55e" stroke-width="2"/>
+    <text x="340" y="129" text-anchor="middle" font-size="10" font-weight="600" fill="#166534">OutputNorm</text>
+
+    <!-- h_prev input -->
+    <text x="280" y="52" text-anchor="middle" font-size="9" fill="#16a34a">h_prev [L, B, H]</text>
+
+    <!-- Recurrence arrow -->
+    <path d="M 320 75 Q 360 75 360 50 Q 360 30 310 30 Q 260 30 260 55" stroke="#22c55e" stroke-width="1.5" stroke-dasharray="5,3" fill="none" marker-end="url(#arrow)"/>
+    <text x="340" y="26" font-size="8" fill="#16a34a">h_new (detach for TBPTT)</text>
+
+    <!-- Output label -->
+    <text x="200" y="150" text-anchor="middle" font-size="10" fill="#166534">Output: h_k [num_layers, B, H] (last layer -> [B, H] via output_norm)</text>
+  </g>
+
+  <!-- Arrow from GRU to LoRA Generator -->
+  <line x1="300" y1="500" x2="300" y2="540" stroke="#555" stroke-width="2" marker-end="url(#arrow)"/>
+  <text x="310" y="525" font-size="10" fill="#555">h_k (last layer) [B, H]</text>
+
+  <!-- ================================================================== -->
+  <!-- Component 4: LoRA Generator (PAW-style) -->
+  <!-- ================================================================== -->
+  <g transform="translate(50, 550)">
+    <rect x="0" y="0" width="800" height="240" rx="12" fill="url(#grad-lora)" stroke="#ec4899" stroke-width="2"/>
+    <text x="400" y="24" text-anchor="middle" font-size="14" font-weight="bold" fill="#9d174d">Component 4: LoRA Generator (PAW-style Shared Basis)</text>
+
+    <!-- Trunk -->
+    <rect x="30" y="45" width="190" height="75" rx="8" fill="#fff" stroke="#f9a8d4" stroke-width="1.5"/>
+    <text x="125" y="65" text-anchor="middle" font-size="11" font-weight="600" fill="#9d174d">Trunk Network</text>
+    <text x="125" y="80" text-anchor="middle" font-size="9" fill="#be185d">Linear(H, 512) + GELU</text>
+    <text x="125" y="93" text-anchor="middle" font-size="9" fill="#be185d">+ ResidualMLP x (depth-1)</text>
+    <text x="125" y="106" text-anchor="middle" font-size="9" fill="#be185d">(LayerNorm + FFN + residual)</text>
+
+    <line x1="220" y1="82" x2="258" y2="82" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+    <!-- Coefficient Head -->
+    <rect x="260" y="45" width="190" height="75" rx="8" fill="#fff" stroke="#f9a8d4" stroke-width="1.5"/>
+    <text x="355" y="65" text-anchor="middle" font-size="11" font-weight="600" fill="#9d174d">Coefficient Head</text>
+    <text x="355" y="80" text-anchor="middle" font-size="9" fill="#be185d">Linear(512, L*M*N*2)</text>
+    <text x="355" y="93" text-anchor="middle" font-size="9" fill="#be185d">-> coeffs [B, L, M, N, 2]</text>
+    <text x="355" y="106" text-anchor="middle" font-size="9" fill="#be185d">(alpha_A, alpha_B per basis)</text>
+
+    <line x1="450" y1="82" x2="498" y2="82" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+    <!-- Shared Bases -->
+    <rect x="500" y="40" width="270" height="85" rx="8" fill="#fce7f3" stroke="#ec4899" stroke-width="2"/>
+    <text x="635" y="60" text-anchor="middle" font-size="11" font-weight="600" fill="#9d174d">Shared Basis Mixing</text>
+    <text x="635" y="78" text-anchor="middle" font-size="10" fill="#be185d">A = einsum("bn,nrd->brd", alpha_A, A_bases)</text>
+    <text x="635" y="93" text-anchor="middle" font-size="10" fill="#be185d">B = einsum("bn,ndr->bdr", alpha_B, B_bases)</text>
+    <text x="635" y="108" text-anchor="middle" font-size="9" fill="#9d174d">A_bases: [N, r, d_in]  B_bases: [N, d_out, r]</text>
+    <text x="635" y="118" text-anchor="middle" font-size="9" fill="#9d174d">N=16 bases per module type</text>
+
+    <!-- Output -->
+    <rect x="200" y="140" width="400" height="45" rx="8" fill="#fce7f3" stroke="#ec4899" stroke-width="2"/>
+    <text x="400" y="160" text-anchor="middle" font-size="12" font-weight="bold" fill="#9d174d">Output: {(layer_idx, module_name): (A, B)}</text>
+    <text x="400" y="175" text-anchor="middle" font-size="10" fill="#be185d">A: [B, r, d_in], B: [B, d_out, r] | scaling = alpha/r</text>
+
+    <line x1="635" y1="125" x2="500" y2="140" stroke="#555" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+    <!-- Module targets -->
+    <text x="400" y="200" text-anchor="middle" font-size="10" fill="#9d174d">Target modules: q_proj, k_proj, v_proj, o_proj, up_proj, gate_proj, down_proj</text>
+    <text x="400" y="216" text-anchor="middle" font-size="10" fill="#9d174d">Applied to 28 transformer layers via forward hooks (rank=16, alpha=32)</text>
+    <text x="400" y="230" text-anchor="middle" font-size="9" fill="#be185d">LoRA hook: output += (input @ A^T @ B^T) * scaling</text>
+  </g>
+
+  <!-- Legend -->
+  <g transform="translate(600, 340)">
+    <rect x="0" y="0" width="250" height="130" rx="8" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>
+    <text x="125" y="20" text-anchor="middle" font-size="11" font-weight="bold" fill="#334155">Legend</text>
+    <rect x="15" y="30" width="14" height="14" rx="3" fill="url(#grad-embed)"/>
+    <text x="35" y="42" font-size="10" fill="#334155">Frozen Embedding Model</text>
+    <rect x="15" y="50" width="14" height="14" rx="3" fill="url(#grad-init)"/>
+    <text x="35" y="62" font-size="10" fill="#334155">Initializer (trainable)</text>
+    <rect x="15" y="70" width="14" height="14" rx="3" fill="url(#grad-gru)"/>
+    <text x="35" y="82" font-size="10" fill="#334155">Repository GRU (trainable)</text>
+    <rect x="15" y="90" width="14" height="14" rx="3" fill="url(#grad-lora)"/>
+    <text x="35" y="102" font-size="10" fill="#334155">LoRA Generator (trainable)</text>
+    <line x1="15" y1="115" x2="29" y2="115" stroke="#555" stroke-width="1.5" stroke-dasharray="5,3"/>
+    <text x="35" y="119" font-size="10" fill="#334155">Recurrent / detached connection</text>
+  </g>
+</svg>

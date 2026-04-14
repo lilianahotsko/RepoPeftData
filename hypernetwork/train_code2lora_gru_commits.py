@@ -266,19 +266,24 @@ def compute_lm_loss_batch(
     tokenizer: AutoTokenizer,
     max_seq_len: int,
     device: torch.device,
-) -> Optional[torch.Tensor]:
+    backward: bool = False,
+) -> Optional[float]:
     """Compute average cross-entropy loss over a set of (prefix, target) pairs.
 
-    Processes one assertion at a time (batch=1 for the LM) and averages losses.
+    Processes one assertion at a time (batch=1 for the LM).
+    When backward=True, calls .backward() on each assertion's scaled loss
+    immediately so only one computation graph is alive at a time.
+    Returns the average loss as a plain float (always detached).
     """
     if not assertions:
         return None
 
-    total_loss = torch.tensor(0.0, device=device, requires_grad=True)
+    n_total = len(assertions)
+    total_loss_val = 0.0
     n = 0
     pad_id = tokenizer.pad_token_id
 
-    for prefix, target in assertions:
+    for i, (prefix, target) in enumerate(assertions):
         tl = prepare_tokens_and_labels(prefix, target, tokenizer)
         tokens, labels = left_truncate_left_pad(
             tl["tokens"], tl["labels"], max_seq_len, pad_id,
@@ -291,12 +296,17 @@ def compute_lm_loss_batch(
 
         out = model(input_ids=input_ids, attention_mask=attn_mask, labels=lbl)
         loss = out["loss"] if isinstance(out, dict) else out[0]
-        total_loss = total_loss + loss
+
+        if backward:
+            is_last = (i == n_total - 1)
+            (loss / n_total).backward(retain_graph=not is_last)
+
+        total_loss_val += loss.item()
         n += 1
 
     if n == 0:
         return None
-    return total_loss / n
+    return total_loss_val / n
 
 
 # ---------------------------------------------------------------------------
@@ -380,13 +390,13 @@ def evaluate_commit_sequential(
                 continue
 
             hooks = apply_lora_hooks(target_modules_dict, lora_params, scaling)
-            loss = compute_lm_loss_batch(
+            avg_loss = compute_lm_loss_batch(
                 base_model, assertions, tokenizer, max_seq_len, device,
             )
             remove_lora_hooks(hooks)
 
-            if loss is not None:
-                repo_loss += loss.item()
+            if avg_loss is not None:
+                repo_loss += avg_loss
                 repo_n += 1
 
         if repo_n > 0:
@@ -480,16 +490,16 @@ def train_commit_sequential(
                     continue
 
                 hooks = apply_lora_hooks(target_modules_dict, lora_params, scaling)
-                loss = compute_lm_loss_batch(
+                avg_loss = compute_lm_loss_batch(
                     base_model, assertions, tokenizer, max_seq_len, device,
+                    backward=True,
                 )
                 remove_lora_hooks(hooks)
 
-                if loss is not None:
-                    loss.backward()
-                    accum_loss_val += loss.item()
+                if avg_loss is not None:
+                    accum_loss_val += avg_loss
                     accum_count += 1
-                    repo_loss_val += loss.item()
+                    repo_loss_val += avg_loss
                     repo_loss_n += 1
 
                 h = h.detach()

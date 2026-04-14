@@ -14,8 +14,8 @@ mkdir -p slurm_logs
 DB_PATH="${DB_PATH:-$SPLITS_DIR/commits_assertions.db}"
 SUFFIX="${SUFFIX:-default}"
 # Cap training repos (first N from train split). Unset or empty = use all.
-LIMIT_TRAIN_REPOS=10
-OUT_DIR="$CKPT_DIR/CODE2LORA_GRU/commit_level_${SUFFIX}"
+LIMIT_TRAIN_REPOS=512
+OUT_DIR="$CKPT_DIR/CODE2LORA_GRU/commit_level_full_${SUFFIX}"
 
 echo "===== Train: Code2LoRA-GRU (commit-level, diff-based) ====="
 echo "DB path:       $DB_PATH"
@@ -48,9 +48,9 @@ python hypernetwork/train_code2lora_gru_commits.py \
     --warmup-ratio 0.03 \
     --max-grad-norm 5.0 \
     --epochs 3 \
-    --eval-steps 200 \
-    --save-steps 500 \
-    --logging-steps 10 \
+    --eval-steps 100 \
+    --save-steps 100 \
+    --logging-steps 100 \
     --seed 3407 \
     --no-initial-eval \
     ${LIMIT_TRAIN_REPOS:+--limit-train-repos "$LIMIT_TRAIN_REPOS"}

@@ -504,3 +504,29 @@ test file level: train 80% -> 80(train)/20 (test)(ir)
 
 - add the statistics : how many version are in the each versions / how many token are in the diffs 
 
+
+
+Used in train:
+
+=== Lines per unified diff (production_code_diff) ===
+  min:    0
+  max:    216274
+  mean:   200.12
+  median: 23.00
+  std:    1888.72
+  p90:    293.0
+  p95:    615.0
+  p99:    2667.5
+
+=== Tokens per unified diff (production_code_diff) ===
+  tokenizer: hf:Qwen/Qwen3-Embedding-0.6B
+  min:    0
+  max:    3814966
+  mean:   2246.65
+  median: 277.00
+  std:    30734.44
+  p90:    3025.5
+  p95:    6340.8
+  p99:    27842.8
+
+

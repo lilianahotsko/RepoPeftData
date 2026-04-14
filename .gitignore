@@ -1,3 +1,6 @@
+# Local mirror of DB (large; copy from $SCRATCH/REPO_DATASET if needed)
+src/commits_assertions.db
+
 # Dataset files
 dataset/
 repositories.json
