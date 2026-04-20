@@ -1,26 +1,35 @@
 #!/usr/bin/env python3
 """
-Commit-level training for Code2LoRA-GRU: iterate over each commit in a
+Commit-level training for Code2LoRA-GRU: iterate over each kept commit in a
 repository's history, embed the diff on-the-fly, update the GRU hidden state,
 generate a LoRA, and compute loss on assertions available up to that commit.
 
-Data source: SQLite database built by create_dataset/build_commit_assertion_db.py
-    commits(repo_id, commit_index, commit_sha, production_code_diff)
-    assertions(repo_id, commit_index, assertion_prefix, assertion_target)
+Supported data sources (mutually exclusive at the CLI level):
+
+* ``--parquet-dir DIR`` (preferred) reads the Parquet dataset built by
+  ``create_dataset/build_commit_parquet_db.py`` (``commits.parquet`` +
+  ``qna_pairs.parquet`` or per-repo ``shards/``). Each row carries
+  ``cross_repo_split`` (train / cr_val / cr_test) and ``in_repo_split``
+  (train / val / test, chronological 80/10/10 over kept commits).
+* ``--db-path FILE`` reads the legacy SQLite database built by
+  ``create_dataset/build_commit_assertion_db.py`` (all commits, one diff each).
 
 Training loop per repository:
   1. Initialize h_0 (zeros or from initializer).
   2. For each commit k in chronological order:
      a. Embed production_code_diff via frozen Qwen3-Embedding (chunk + MaxPool||MeanPool).
      b. GRU step: h_k = encode_repository_commit(diff_emb_k, h_{k-1}).
-     c. Collect assertions where commit_index <= k (cumulative).
+     c. Collect assertions where commit_index <= k (cumulative) filtered by
+        in-repo split (train for training, val/test for evaluation).
      d. If assertions exist: generate LoRA from h_k, apply hooks, compute LM loss.
-     e. Detach h_k for truncated BPTT.
+     e. Detach h_k for truncated BPTT (TBPTT window = 1 across commits).
   3. Backprop accumulated loss, step optimizer.
 
 Usage:
     python hypernetwork/train_code2lora_gru_commits.py \\
-        --db-path $SCRATCH/REPO_DATASET/commits_assertions.db
+        --parquet-dir $SCRATCH/REPO_DATASET/commit_parquet
+    python hypernetwork/train_code2lora_gru_commits.py \\
+        --db-path    $SCRATCH/REPO_DATASET/commits_assertions.db
 """
 
 import argparse
@@ -45,6 +54,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from code2lora_gru import Code2LoRAGRU, pool_file_chunks_maxmean
+from parquet_commit_dataset import (
+    load_commit_sequences_from_parquet,
+    resolve_parquet_sources,
+    summarize_items,
+)
 from train_code2lora_gru import (
     apply_lora_hooks,
     discover_target_modules,
@@ -236,12 +250,49 @@ def load_commit_sequences_from_db(
 def get_assertions_up_to(
     assertions_by_commit: Dict[int, List[Tuple[str, str]]],
     current_commit_index: int,
+    splits_by_commit: Optional[Dict[int, List[str]]] = None,
+    keep_splits: Optional[List[str]] = None,
+    mode: str = "cumulative",
 ) -> List[Tuple[str, str]]:
-    """Collect all assertions with commit_index <= current_commit_index."""
-    result = []
+    """Collect assertions for the loss at ``current_commit_index``.
+
+    Modes
+    -----
+    * ``cumulative``: all assertions with ``commit_index <= current_commit_index``
+      (optionally filtered by in-repo split).
+    * ``new``: only assertions with ``commit_index == current_commit_index``
+      (the "delta" introduced at this kept commit).
+
+    If ``splits_by_commit`` + ``keep_splits`` are both provided, assertions
+    are filtered so that only those whose in-repo split is in ``keep_splits``
+    are returned.
+    """
+    result: List[Tuple[str, str]] = []
+    filter_splits: Optional[set] = (
+        set(keep_splits) if (splits_by_commit and keep_splits) else None
+    )
+
+    def _emit(ci: int, pairs: List[Tuple[str, str]]) -> None:
+        if filter_splits is None:
+            result.extend(pairs)
+            return
+        splits = (splits_by_commit or {}).get(ci, [])
+        if len(splits) != len(pairs):
+            result.extend(pairs)
+            return
+        for (pair, s) in zip(pairs, splits):
+            if s in filter_splits:
+                result.append(pair)
+
+    if mode == "new":
+        if current_commit_index in assertions_by_commit:
+            _emit(current_commit_index, assertions_by_commit[current_commit_index])
+        return result
+
+    # cumulative
     for ci, pairs in assertions_by_commit.items():
         if ci <= current_commit_index:
-            result.extend(pairs)
+            _emit(ci, pairs)
     return result
 
 
@@ -354,8 +405,17 @@ def evaluate_commit_sequential(
     max_seq_len: int,
     device: torch.device,
     max_assertions_per_commit: int = 0,
+    keep_splits: Optional[List[str]] = None,
+    assertion_mode: str = "cumulative",
 ) -> Dict[str, float]:
-    """Run commit-sequential evaluation, returning average loss."""
+    """Run commit-sequential evaluation, returning average loss.
+
+    ``keep_splits`` controls assertion filtering by in-repo split
+    (e.g. ``['val']`` for in-repo val eval, ``['test']`` for test, or
+    ``None`` to use every assertion in the repo).
+    ``assertion_mode`` is ``'cumulative'`` (default) or ``'new'``; see
+    :func:`get_assertions_up_to` for semantics.
+    """
     code2lora_gru.eval()
     base_model.eval()
     scaling = code2lora_gru.lora_generator.lora_scaling
@@ -363,6 +423,7 @@ def evaluate_commit_sequential(
     total_loss = 0.0
     total_repos = 0
     total_commits_with_loss = 0
+    total_assertions_evaluated = 0
 
     for repo_item in eval_data:
         h = code2lora_gru.compute_h0(
@@ -371,6 +432,8 @@ def evaluate_commit_sequential(
         repo_loss = 0.0
         repo_n = 0
 
+        splits_by_commit = repo_item.get("assertion_splits")
+
         for k, diff_text in enumerate(repo_item["commit_diffs"]):
             ci = repo_item["commit_indices"][k]
             diff_emb = diff_embedder.embed_diff(diff_text).unsqueeze(0).to(device=device, dtype=torch.float32)
@@ -378,6 +441,9 @@ def evaluate_commit_sequential(
 
             assertions = get_assertions_up_to(
                 repo_item["assertions_by_commit"], ci,
+                splits_by_commit=splits_by_commit,
+                keep_splits=keep_splits,
+                mode=assertion_mode,
             )
             if not assertions:
                 continue
@@ -398,6 +464,7 @@ def evaluate_commit_sequential(
             if avg_loss is not None:
                 repo_loss += avg_loss
                 repo_n += 1
+                total_assertions_evaluated += len(assertions)
 
         if repo_n > 0:
             total_loss += repo_loss / repo_n
@@ -409,12 +476,84 @@ def evaluate_commit_sequential(
         "eval_loss": avg_loss,
         "eval_repos": total_repos,
         "eval_commits_with_loss": total_commits_with_loss,
+        "eval_assertions": total_assertions_evaluated,
     }
 
 
 # ---------------------------------------------------------------------------
 # Training loop (commit-sequential)
 # ---------------------------------------------------------------------------
+
+def _run_eval_suite(
+    code2lora_gru: Code2LoRAGRU,
+    base_model: nn.Module,
+    diff_embedder: DiffEmbedder,
+    eval_suites: Dict[str, Dict[str, Any]],
+    target_modules_dict: Dict,
+    tokenizer: AutoTokenizer,
+    max_seq_len: int,
+    device: torch.device,
+    max_assertions_per_commit: int,
+    tag_prefix: str,
+    global_step: int,
+    assertion_mode: str = "cumulative",
+) -> Tuple[Dict[str, float], float]:
+    """Evaluate each suite in ``eval_suites`` and return a flattened dict
+    keyed like ``f"{tag_prefix}/{suite_name}/{metric}"`` together with the
+    loss used for checkpoint selection (uses the first suite that has data).
+    """
+    metrics: Dict[str, float] = {}
+    selection_loss = float("inf")
+    for name, suite in eval_suites.items():
+        data = suite.get("data") or []
+        if not data:
+            continue
+        keep_splits = suite.get("keep_splits")
+        m = evaluate_commit_sequential(
+            code2lora_gru, base_model, diff_embedder, data,
+            target_modules_dict, tokenizer, max_seq_len, device,
+            max_assertions_per_commit=max_assertions_per_commit,
+            keep_splits=keep_splits,
+            assertion_mode=assertion_mode,
+        )
+        for k, v in m.items():
+            metrics[f"{tag_prefix}/{name}/{k}"] = v
+        # Selection: prefer in_repo_val, then cross_repo_val, then any
+        if suite.get("is_primary", False) and m["eval_loss"] < selection_loss:
+            selection_loss = m["eval_loss"]
+    # fallback selection if no primary flagged
+    if selection_loss == float("inf"):
+        for name, suite in eval_suites.items():
+            data = suite.get("data") or []
+            if not data:
+                continue
+            selection_loss = metrics.get(f"{tag_prefix}/{name}/eval_loss", selection_loss)
+            break
+    return metrics, selection_loss
+
+
+def _log_eval_metrics(metrics: Dict[str, float], global_step: int) -> None:
+    if not metrics:
+        return
+    # Pretty print
+    groups: Dict[str, Dict[str, float]] = defaultdict(dict)
+    for k, v in metrics.items():
+        parts = k.split("/")
+        if len(parts) >= 3:
+            groups[parts[1]][parts[2]] = v
+        else:
+            groups["_"][k] = v
+    for name, d in groups.items():
+        loss = d.get("eval_loss", float("nan"))
+        repos = d.get("eval_repos", 0)
+        ca = d.get("eval_commits_with_loss", 0)
+        aa = d.get("eval_assertions", 0)
+        print(
+            f"    [{name}] loss={loss:.4f} repos={int(repos)} "
+            f"commits_w_loss={int(ca)} assertions={int(aa)}"
+        )
+    wandb.log(metrics, step=global_step)
+
 
 def train_commit_sequential(
     code2lora_gru: Code2LoRAGRU,
@@ -423,7 +562,7 @@ def train_commit_sequential(
     optimizer: torch.optim.Optimizer,
     scheduler: Optional[Any],
     train_data: List[Dict],
-    eval_data: Optional[List[Dict]],
+    eval_suites: Dict[str, Dict[str, Any]],
     target_modules_dict: Dict,
     tokenizer: AutoTokenizer,
     args,
@@ -434,6 +573,9 @@ def train_commit_sequential(
     best_eval_loss = float("inf")
     max_seq_len = args.max_seq_len
     max_assertions_per_commit = args.max_assertions_per_commit
+    train_keep_splits = (
+        list(args.train_in_repo_splits) if args.train_in_repo_splits else None
+    )
 
     total_repos_per_epoch = len(train_data)
     total_steps_est = total_repos_per_epoch * args.epochs
@@ -441,7 +583,8 @@ def train_commit_sequential(
     print(f"\nTraining: {total_repos_per_epoch} repos/epoch, "
           f"{args.epochs} epochs, ~{total_steps_est} repo steps")
     print(f"  grad_accum={args.grad_accum} "
-          f"max_assertions_per_commit={max_assertions_per_commit}")
+          f"max_assertions_per_commit={max_assertions_per_commit} "
+          f"train_in_repo_splits={train_keep_splits}")
 
     for epoch in range(args.epochs):
         code2lora_gru.train()
@@ -460,6 +603,7 @@ def train_commit_sequential(
             commit_diffs = repo_item["commit_diffs"]
             commit_indices = repo_item["commit_indices"]
             assertions_by_commit = repo_item["assertions_by_commit"]
+            splits_by_commit = repo_item.get("assertion_splits")
             n_commits = len(commit_diffs)
 
             h = code2lora_gru.compute_h0(
@@ -476,7 +620,12 @@ def train_commit_sequential(
                 diff_emb = diff_embedder.embed_diff(diff_text).unsqueeze(0).to(device=device, dtype=torch.float32)
                 h = code2lora_gru.encode_repository_commit(diff_emb, h)
 
-                assertions = get_assertions_up_to(assertions_by_commit, ci)
+                assertions = get_assertions_up_to(
+                    assertions_by_commit, ci,
+                    splits_by_commit=splits_by_commit,
+                    keep_splits=train_keep_splits,
+                    mode=args.assertion_mode,
+                )
                 if not assertions:
                     h = h.detach()
                     continue
@@ -554,27 +703,19 @@ def train_commit_sequential(
                 args.eval_steps > 0
                 and global_step > 0
                 and global_step % args.eval_steps == 0
-                and eval_data
+                and eval_suites
             ):
                 print(f"\n  Eval at step {global_step}...")
-                eval_metrics = evaluate_commit_sequential(
-                    code2lora_gru, base_model, diff_embedder, eval_data,
+                eval_metrics, sel_loss = _run_eval_suite(
+                    code2lora_gru, base_model, diff_embedder, eval_suites,
                     target_modules_dict, tokenizer, max_seq_len, device,
-                    max_assertions_per_commit=max_assertions_per_commit,
+                    max_assertions_per_commit, "eval", global_step,
+                    assertion_mode=args.assertion_mode,
                 )
-                eval_loss = eval_metrics["eval_loss"]
-                print(
-                    f"  eval_loss={eval_loss:.4f} "
-                    f"repos={eval_metrics['eval_repos']} "
-                    f"commits_with_loss={eval_metrics['eval_commits_with_loss']}",
-                )
-                wandb.log(
-                    {"eval/loss": eval_loss, **{f"eval/{k}": v for k, v in eval_metrics.items()}},
-                    step=global_step,
-                )
+                _log_eval_metrics(eval_metrics, global_step)
 
-                if eval_loss < best_eval_loss:
-                    best_eval_loss = eval_loss
+                if sel_loss < best_eval_loss:
+                    best_eval_loss = sel_loss
                     save_checkpoint(
                         code2lora_gru, target_modules_dict, optimizer,
                         epoch, global_step, args.output_dir,
@@ -625,25 +766,17 @@ def train_commit_sequential(
             "train/epoch": epoch + 1,
         }, step=global_step)
 
-        if eval_data:
+        if eval_suites:
             print(f"\n  End-of-epoch eval...")
-            eval_metrics = evaluate_commit_sequential(
-                code2lora_gru, base_model, diff_embedder, eval_data,
+            eval_metrics, sel_loss = _run_eval_suite(
+                code2lora_gru, base_model, diff_embedder, eval_suites,
                 target_modules_dict, tokenizer, max_seq_len, device,
-                max_assertions_per_commit=max_assertions_per_commit,
+                max_assertions_per_commit, "eval_epoch", global_step,
+                assertion_mode=args.assertion_mode,
             )
-            eval_loss = eval_metrics["eval_loss"]
-            print(
-                f"  eval_loss={eval_loss:.4f} "
-                f"repos={eval_metrics['eval_repos']} "
-                f"commits_with_loss={eval_metrics['eval_commits_with_loss']}",
-            )
-            wandb.log(
-                {"eval/loss": eval_loss, **{f"eval/{k}": v for k, v in eval_metrics.items()}},
-                step=global_step,
-            )
-            if eval_loss < best_eval_loss:
-                best_eval_loss = eval_loss
+            _log_eval_metrics(eval_metrics, global_step)
+            if sel_loss < best_eval_loss:
+                best_eval_loss = sel_loss
                 save_checkpoint(
                     code2lora_gru, target_modules_dict, optimizer,
                     epoch, global_step, args.output_dir,
@@ -675,21 +808,65 @@ def train_commit_sequential(
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Train Code2LoRA-GRU (commit-sequential, DB-backed)",
+        description="Train Code2LoRA-GRU (commit-sequential)",
     )
 
     default_dataset = os.path.join(
         os.environ.get("SCRATCH", os.path.expanduser("~/scratch")),
         "REPO_DATASET",
     )
+    default_parquet_dir = os.path.join(default_dataset, "commit_parquet")
     default_db = os.path.join(default_dataset, "commits_assertions.db")
 
+    # Data source (mutually-exclusive at the semantic level)
+    ap.add_argument("--parquet-dir", type=str, default=default_parquet_dir,
+                    help="Directory containing commits.parquet + qna_pairs.parquet "
+                         "(or shards/*.parquet). Preferred data source.")
+    ap.add_argument("--commits-parquet", type=str, default=None,
+                    help="Explicit path to commits.parquet (overrides --parquet-dir).")
+    ap.add_argument("--qna-parquet", type=str, default=None,
+                    help="Explicit path to qna_pairs.parquet (overrides --parquet-dir).")
+    ap.add_argument("--parquet-prefer", type=str, default="auto",
+                    choices=["auto", "concat", "shards"],
+                    help="Which parquet layout to read from inside --parquet-dir.")
     ap.add_argument("--db-path", type=str, default=default_db,
-                    help="Path to commits_assertions.db")
+                    help="[Legacy] Path to commits_assertions.db (SQLite).")
+    ap.add_argument("--data-source", type=str, default="parquet",
+                    choices=["parquet", "db"],
+                    help="Which dataset backend to use.")
+
     ap.add_argument("--splits-dir", type=str, default=default_dataset,
-                    help="Split JSONs dir (for train/val/test repo partitioning)")
+                    help="Split JSONs dir (only used by the legacy DB backend).")
     ap.add_argument("--limit-train-repos", type=int, default=None)
     ap.add_argument("--limit-eval-repos", type=int, default=None)
+
+    # In-repo / cross-repo split controls (parquet backend)
+    ap.add_argument("--train-in-repo-splits", nargs="+", default=["train"],
+                    help="Assertions with these in-repo splits are used for the "
+                         "training loss.")
+    ap.add_argument("--in-repo-val-splits", nargs="+", default=["val"],
+                    help="Assertions used for the in-repo val eval on training repos.")
+    ap.add_argument("--in-repo-test-splits", nargs="+", default=["test"],
+                    help="Assertions used for the in-repo test eval on training repos.")
+    ap.add_argument("--cross-repo-eval-splits", nargs="+",
+                    default=["cr_val", "cr_test"],
+                    help="cross_repo_split values to form the held-out eval sets.")
+    ap.add_argument("--no-in-repo-eval", action="store_true",
+                    help="Disable the in-repo val/test evals (kept for ablations).")
+    ap.add_argument("--no-cross-repo-eval", action="store_true",
+                    help="Disable the cross-repo val/test evals.")
+    ap.add_argument(
+        "--assertion-mode", type=str, default="cumulative",
+        choices=["cumulative", "new"],
+        help=(
+            "How to pick assertions at commit k. "
+            "'cumulative' (default): all assertions with commit_index <= k "
+            "matching the split filter. 'new': only assertions newly "
+            "introduced at commit_index == k. 'new' is faster and closer "
+            "to the dataset's semantics (kept commits == commits that add "
+            "new assertions); 'cumulative' stresses long-horizon retention."
+        ),
+    )
     ap.add_argument("--model-name", type=str, default="Qwen/Qwen2.5-Coder-1.5B")
     ap.add_argument("--embed-model", type=str, default=DEFAULT_EMBED_MODEL,
                     help="Embedding model for on-the-fly diff encoding")
@@ -754,49 +931,114 @@ def main():
     args = ap.parse_args()
     set_seed(args.seed)
 
-    db_path = Path(args.db_path).expanduser().resolve()
     splits_dir = Path(args.splits_dir).expanduser().resolve()
 
-    if not db_path.exists():
-        raise FileNotFoundError(
-            f"DB not found: {db_path}\n"
-            f"Run: python create_dataset/build_commit_assertion_db.py --db-path {db_path}"
+    eval_suites: Dict[str, Dict[str, Any]] = {}
+
+    if args.data_source == "parquet":
+        print("=" * 80)
+        print("[DATA] Loading commit sequences from Parquet...")
+        sources = resolve_parquet_sources(
+            parquet_dir=args.parquet_dir,
+            commits_path=args.commits_parquet,
+            qna_path=args.qna_parquet,
+            prefer=args.parquet_prefer,
+        )
+        print(f"  parquet source: kind={sources.source_kind} "
+              f"commits={len(sources.commits_paths)} qna={len(sources.qna_paths)}")
+
+        # Training set: cross_repo_split='train' repos, all kept commits,
+        # but assertion loss filtered by --train-in-repo-splits.
+        train_data = load_commit_sequences_from_parquet(
+            sources,
+            cross_repo_splits=["train"],
+            in_repo_splits=None,  # load every assertion; filter at loss time
+            limit_repos=args.limit_train_repos,
         )
 
-    # ── Load repo IDs from split files for train/eval partitioning ──
-    print("Loading split repo IDs...")
-    train_repo_ids = load_split_repo_ids(splits_dir, "train.json")
-    eval_repo_ids = load_split_repo_ids(splits_dir, "cr_val.json")
-    print(f"  Split files: train={len(train_repo_ids)} repos, eval={len(eval_repo_ids)} repos")
+        if not args.no_in_repo_eval:
+            # Reuse training repos; cap to --limit-eval-repos for speed.
+            if args.limit_eval_repos is not None:
+                in_repo_val = train_data[: args.limit_eval_repos]
+            else:
+                in_repo_val = train_data
+            eval_suites["in_repo_val"] = {
+                "data": in_repo_val,
+                "keep_splits": list(args.in_repo_val_splits),
+                "is_primary": True,
+            }
+            eval_suites["in_repo_test"] = {
+                "data": in_repo_val,  # same repo sequences, different keep_splits
+                "keep_splits": list(args.in_repo_test_splits),
+                "is_primary": False,
+            }
 
-    # ── Load commit sequences from DB ──
-    print(f"Loading commit sequences from {db_path}...")
-    train_data = load_commit_sequences_from_db(
-        str(db_path),
-        split_repo_ids=train_repo_ids if train_repo_ids else None,
-        limit_repos=args.limit_train_repos,
-    )
-    eval_data = load_commit_sequences_from_db(
-        str(db_path),
-        split_repo_ids=eval_repo_ids if eval_repo_ids else None,
-        limit_repos=args.limit_eval_repos,
-    )
+        if not args.no_cross_repo_eval and args.cross_repo_eval_splits:
+            for cr in args.cross_repo_eval_splits:
+                data = load_commit_sequences_from_parquet(
+                    sources,
+                    cross_repo_splits=[cr],
+                    in_repo_splits=None,
+                    limit_repos=args.limit_eval_repos,
+                )
+                eval_suites[f"cross_repo_{cr}"] = {
+                    "data": data,
+                    "keep_splits": None,  # use every assertion on held-out repos
+                    "is_primary": (cr == "cr_val" and args.no_in_repo_eval),
+                }
+    else:  # legacy SQLite DB backend
+        db_path = Path(args.db_path).expanduser().resolve()
+        if not db_path.exists():
+            raise FileNotFoundError(
+                f"DB not found: {db_path}\n"
+                f"Run: python create_dataset/build_commit_assertion_db.py "
+                f"--db-path {db_path}"
+            )
+        print("Loading split repo IDs...")
+        train_repo_ids = load_split_repo_ids(splits_dir, "train.json")
+        eval_repo_ids = load_split_repo_ids(splits_dir, "cr_val.json")
+        print(f"  Split files: train={len(train_repo_ids)} repos, "
+              f"eval={len(eval_repo_ids)} repos")
+        print(f"Loading commit sequences from {db_path}...")
+        train_data = load_commit_sequences_from_db(
+            str(db_path),
+            split_repo_ids=train_repo_ids if train_repo_ids else None,
+            limit_repos=args.limit_train_repos,
+        )
+        eval_data = load_commit_sequences_from_db(
+            str(db_path),
+            split_repo_ids=eval_repo_ids if eval_repo_ids else None,
+            limit_repos=args.limit_eval_repos,
+        )
+        if eval_data:
+            eval_suites["cross_repo_cr_val"] = {
+                "data": eval_data, "keep_splits": None, "is_primary": True,
+            }
+
+    # ── Summaries ──
+    def _n_a(d: Dict) -> int:
+        return sum(len(v) for v in d["assertions_by_commit"].values())
 
     total_train_commits = sum(len(d["commit_diffs"]) for d in train_data)
-    total_train_assertions = sum(
-        sum(len(v) for v in d["assertions_by_commit"].values())
-        for d in train_data
-    )
+    total_train_assertions = sum(_n_a(d) for d in train_data)
     print(
-        f"  Train: {len(train_data)} repos, {total_train_commits} commits, "
+        f"  Train:      {len(train_data)} repos, {total_train_commits} commits, "
         f"{total_train_assertions} assertions"
     )
-    if eval_data:
-        total_eval_commits = sum(len(d["commit_diffs"]) for d in eval_data)
-        print(f"  Eval:  {len(eval_data)} repos, {total_eval_commits} commits")
+    for name, suite in eval_suites.items():
+        data = suite.get("data") or []
+        if not data:
+            print(f"  {name}: EMPTY (disabled)")
+            continue
+        nc = sum(len(d["commit_diffs"]) for d in data)
+        na = sum(_n_a(d) for d in data)
+        print(f"  {name}: {len(data)} repos, {nc} commits, {na} assertions "
+              f"(keep={suite.get('keep_splits')})")
 
     if not train_data:
-        raise ValueError("No training data loaded from DB. Check --db-path and --splits-dir.")
+        raise ValueError(
+            "No training data loaded. Check --parquet-dir / --db-path.",
+        )
 
     # ── Config ──
     print("=" * 80)
@@ -905,16 +1147,16 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     # ── Initial eval ──
-    if eval_data and not args.no_initial_eval:
+    if eval_suites and not args.no_initial_eval:
         print("\nInitial eval...")
-        init_metrics = evaluate_commit_sequential(
-            code2lora_gru, base_model, diff_embedder, eval_data,
+        init_metrics, _ = _run_eval_suite(
+            code2lora_gru, base_model, diff_embedder, eval_suites,
             target_modules_dict, tok, args.max_seq_len, device,
-            max_assertions_per_commit=args.max_assertions_per_commit,
+            args.max_assertions_per_commit, "eval_init", 0,
+            assertion_mode=args.assertion_mode,
         )
-        print(f"  init_eval_loss={init_metrics['eval_loss']:.4f}")
-        wandb.log({"eval/init_loss": init_metrics["eval_loss"]})
-    elif eval_data and args.no_initial_eval:
+        _log_eval_metrics(init_metrics, 0)
+    elif eval_suites and args.no_initial_eval:
         print("\nSkipping initial eval (--no-initial-eval).")
 
     # ── Train ──
@@ -925,7 +1167,7 @@ def main():
         optimizer=optimizer,
         scheduler=scheduler,
         train_data=train_data,
-        eval_data=eval_data if eval_data else None,
+        eval_suites=eval_suites,
         target_modules_dict=target_modules_dict,
         tokenizer=tok,
         args=args,

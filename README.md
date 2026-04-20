@@ -530,3 +530,14 @@ Used in train:
   p99:    27842.8
 
 
+
+- use the latest assertions only 
+- evaluation also using just the assertions 
+- create the file level split for the QnAs in train and val - for consistency 
+- keep the complete prefix from the test file before the cutting line 
+- change the diffs generation- use just the diffs between the commits that have assertions 
+- after the commit split - 
+
+Aq1: traning on this commit structure 
+Aq2: accuracy getting lower after many commits 
+Aq3 : also using file qna split 

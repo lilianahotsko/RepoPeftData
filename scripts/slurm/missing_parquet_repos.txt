@@ -1,0 +1,26 @@
+# Remaining repos not yet listed in commit_parquet/_done.*.jsonl (as of prior audit).
+# Used by sbatch_commit_parquet_remaining.sh with --repo-list.
+0xricksanchez/like-dbg
+15r10nk/inline-snapshot
+AlignmentResearch/tuned-lens
+AndrewAnnex/SpiceyPy
+Mayitzin/ahrs
+MongoEngine/mongoengine
+Neoteroi/BlackSheep
+QuixiAI/Hexis
+cantools/cantools
+joke2k/faker
+marcospereirampj/python-keycloak
+marshmallow-code/marshmallow
+omni-us/jsonargparse
+patroni/patroni
+peteromallet/desloppify
+psf/black
+pyccel/pyccel
+pynamodb/PynamoDB
+pyparsing/pyparsing
+python-attrs/attrs
+python-cmd2/cmd2
+redis/redis-py
+sissaschool/xmlschema
+temporalio/sdk-python

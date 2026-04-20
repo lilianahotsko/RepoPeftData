@@ -29,7 +29,7 @@ if [ ! -d "$VENV_DIR" ]; then
     pip install --upgrade pip
     pip install torch transformers peft datasets accelerate \
                 bitsandbytes wandb huggingface_hub codebleu \
-                sentencepiece protobuf
+                sentencepiece protobuf pyarrow
     echo "Venv created."
 else
     echo -e "\n>>> Venv already exists, activating..."

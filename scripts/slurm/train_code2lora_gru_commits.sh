@@ -1,28 +1,56 @@
 #!/bin/bash
-#SBATCH --job-name=train_gru_diff
-#SBATCH --output=slurm_logs/train_gru_diff_%j.out
-#SBATCH --error=slurm_logs/train_gru_diff_%j.err
-#SBATCH --time=06:00:00
+#SBATCH --job-name=train_gru_parquet
+#SBATCH --output=slurm_logs/train_gru_parquet_%j.out
+#SBATCH --error=slurm_logs/train_gru_parquet_%j.err
+#SBATCH --time=2:00:00
 #SBATCH --gres=gpu:h100:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=128G
 #SBATCH --account=def-yuntian
 
 source scripts/slurm/common.sh
+module load arrow/18.1.0
 mkdir -p slurm_logs
 
-DB_PATH="${DB_PATH:-$SPLITS_DIR/commits_assertions.db}"
-SUFFIX="${SUFFIX:-default}"
+# --------- Defaults (overridable via env) ----------
+PARQUET_DIR="${PARQUET_DIR:-$SPLITS_DIR/commit_parquet}"
+PARQUET_PREFER="${PARQUET_PREFER:-auto}"            # auto | concat | shards
+SUFFIX="${SUFFIX:-parquet}"
 OUT_DIR="$CKPT_DIR/CODE2LORA_GRU/commit_level_${SUFFIX}"
+ASSERTION_MODE="${ASSERTION_MODE:-cumulative}"      # cumulative | new
+MAX_ASSERTIONS_PER_COMMIT="${MAX_ASSERTIONS_PER_COMMIT:-32}"
+EPOCHS="${EPOCHS:-1}"
+GRAD_ACCUM="${GRAD_ACCUM:-4}"
+LR="${LR:-1e-4}"
+EVAL_STEPS="${EVAL_STEPS:-100}"
+SAVE_STEPS="${SAVE_STEPS:-100}"
+LIMIT_TRAIN_REPOS="${LIMIT_TRAIN_REPOS:-0}"         # 0 = no limit
+LIMIT_EVAL_REPOS="${LIMIT_EVAL_REPOS:-64}"          # cap held-out eval size
 
-echo "===== Train: Code2LoRA-GRU (commit-level, diff-based) ====="
-echo "DB path:       $DB_PATH"
-echo "Splits dir:    $SPLITS_DIR"
-echo "Output dir:    $OUT_DIR"
+EXTRA_ARGS=()
+if [ "$LIMIT_TRAIN_REPOS" != "0" ]; then
+    EXTRA_ARGS+=(--limit-train-repos "$LIMIT_TRAIN_REPOS")
+fi
+if [ "$LIMIT_EVAL_REPOS" != "0" ]; then
+    EXTRA_ARGS+=(--limit-eval-repos "$LIMIT_EVAL_REPOS")
+fi
+
+echo "===== Train: Code2LoRA-GRU (commit-level, Parquet-backed) ====="
+echo "Parquet dir:             $PARQUET_DIR (prefer=$PARQUET_PREFER)"
+echo "Output dir:              $OUT_DIR"
+echo "Assertion mode:          $ASSERTION_MODE"
+echo "Max assertions/commit:   $MAX_ASSERTIONS_PER_COMMIT"
+echo "Epochs:                  $EPOCHS"
+echo "Grad accum:              $GRAD_ACCUM"
+echo "Learning rate:           $LR"
+echo "Limit train repos:       $LIMIT_TRAIN_REPOS"
+echo "Limit eval repos:        $LIMIT_EVAL_REPOS"
 echo "Start: $(date)"
 
 python hypernetwork/train_code2lora_gru_commits.py \
-    --db-path "$DB_PATH" \
+    --data-source parquet \
+    --parquet-dir "$PARQUET_DIR" \
+    --parquet-prefer "$PARQUET_PREFER" \
     --splits-dir "$SPLITS_DIR" \
     --output-dir "$OUT_DIR" \
     --model-name "Qwen/Qwen2.5-Coder-1.5B" \
@@ -38,16 +66,22 @@ python hypernetwork/train_code2lora_gru_commits.py \
     --chunk-tokens 512 \
     --chunk-overlap 64 \
     --max-seq-len 8192 \
-    --max-assertions-per-commit 0 \
-    --grad-accum 4 \
-    --lr 1e-4 \
+    --train-in-repo-splits train \
+    --in-repo-val-splits val \
+    --in-repo-test-splits test \
+    --cross-repo-eval-splits cr_val cr_test \
+    --assertion-mode "$ASSERTION_MODE" \
+    --max-assertions-per-commit "$MAX_ASSERTIONS_PER_COMMIT" \
+    --grad-accum "$GRAD_ACCUM" \
+    --lr "$LR" \
     --weight-decay 0.01 \
     --warmup-ratio 0.03 \
-    --max-grad-norm 5.0 \
-    --epochs 3 \
-    --eval-steps 200 \
-    --save-steps 500 \
+    --max-grad-norm 1.0 \
+    --epochs "$EPOCHS" \
+    --eval-steps "$EVAL_STEPS" \
+    --save-steps "$SAVE_STEPS" \
     --logging-steps 10 \
-    --seed 3407
+    --seed 3407 \
+    "${EXTRA_ARGS[@]}"
 
 echo "Done: $(date)"

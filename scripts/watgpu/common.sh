@@ -24,6 +24,16 @@ export ORACLE_CACHE_DIR="$DATA_ROOT/oracle_context_cache"
 export CKPT_DIR="${SCRATCH:-$HOME/scratch}/repopeft_checkpoints"
 export BASELINES_DIR="${SCRATCH:-$HOME/scratch}/repopeft_baselines"
 
+# Commit-level Parquet dataset (HF layout: commits/ qna/ splits/ [shards/]).
+# Populated by scripts/watgpu/setup_commit_dataset.sh.
+export COMMIT_DATA_DIR="$DATA_ROOT/commit_parquet_hf"
+
+# Cache dirs so heavyweight downloads live on scratch (not $HOME quota).
+export HF_HOME="${HF_HOME:-$DATA_ROOT/.hf_cache}"
+export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-$HF_HOME/hub}"
+export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$HF_HOME/hub}"
+mkdir -p "$HF_HOME"
+
 cd "$(dirname "$0")/../.."   # repo root
 
 mkdir -p "$CKPT_DIR" "$BASELINES_DIR" slurm_logs
