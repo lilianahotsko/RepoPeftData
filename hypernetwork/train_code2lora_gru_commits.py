@@ -134,6 +134,7 @@ class DiffEmbedder:
 
     @torch.no_grad()
     def _embed_texts(self, texts: List[str]) -> torch.Tensor:
+        """Return a [len(texts), D] tensor on CPU (fp32)."""
         all_vecs = []
         for i in range(0, len(texts), self.batch_size):
             batch = texts[i : i + self.batch_size]
@@ -144,15 +145,16 @@ class DiffEmbedder:
                 max_length=self.max_length,
                 return_tensors="pt",
             )
-            enc = {k: v.to(self.device) for k, v in enc.items()}
+            enc = {k: v.to(self.device, non_blocking=True) for k, v in enc.items()}
             out = self.model(**enc)
             last = out.last_hidden_state
-            mask = enc["attention_mask"].unsqueeze(-1)
+            mask = enc["attention_mask"].unsqueeze(-1).to(last.dtype)
             mean = (last * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
-            all_vecs.append(mean.detach().cpu())
+            # Accumulate on-device; only move to CPU once per diff at the end.
+            all_vecs.append(mean.detach())
         if not all_vecs:
             return torch.empty((0, self._embed_dim))
-        return torch.cat(all_vecs, dim=0)
+        return torch.cat(all_vecs, dim=0).float().cpu()
 
     def embed_diff(self, diff_text: str) -> torch.Tensor:
         """Embed a single diff text string -> [2*D] vector (MaxPool||MeanPool)."""
@@ -163,7 +165,7 @@ class DiffEmbedder:
         )
         if not chunks:
             return self._zero.clone()
-        chunk_embs = self._embed_texts(chunks)  # [K, D]
+        chunk_embs = self._embed_texts(chunks)  # [K, D] on CPU fp32
         return pool_file_chunks_maxmean(chunk_embs)  # [2*D]
 
 
@@ -360,6 +362,159 @@ def compute_lm_loss_batch(
     return total_loss_val / n
 
 
+def compute_lm_loss_micro_batched(
+    model: nn.Module,
+    tokenized_items: List[Dict[str, Any]],
+    pad_id: int,
+    device: torch.device,
+    micro_batch: int,
+    backward: bool = False,
+) -> Optional[float]:
+    """Padded + micro-batched version of :func:`compute_lm_loss_batch`.
+
+    Each element of ``tokenized_items`` has ``tokens`` and ``labels`` as
+    already-truncated Python lists / numpy arrays (see
+    :func:`_precompute_repo_cache`). We pad each micro-batch to the longest
+    sequence inside *that* batch so short assertions don't waste FLOPs on
+    empty positions.
+
+    The reported and back-propagated loss is the macro-average over
+    assertions — i.e. per-assertion mean CE, then mean over assertions —
+    to preserve the semantics of the old per-assertion implementation.
+    """
+    if not tokenized_items:
+        return None
+
+    n_total = len(tokenized_items)
+
+    # Sort by length so each micro-batch has similar-length rows -> less padding.
+    order = sorted(range(n_total), key=lambda i: len(tokenized_items[i]["tokens"]))
+    items_sorted = [tokenized_items[i] for i in order]
+    micro_batches = [
+        items_sorted[i : i + max(micro_batch, 1)]
+        for i in range(0, n_total, max(micro_batch, 1))
+    ]
+    n_micro = len(micro_batches)
+
+    loss_accum_val = 0.0
+    for bi, batch in enumerate(micro_batches):
+        max_len = max(len(b["tokens"]) for b in batch)
+        B = len(batch)
+
+        input_ids = torch.full((B, max_len), pad_id, dtype=torch.long, device=device)
+        labels = torch.full((B, max_len), -100, dtype=torch.long, device=device)
+        for r, b in enumerate(batch):
+            toks = b["tokens"]
+            lbls = b["labels"]
+            L = len(toks)
+            offset = max_len - L  # left-pad: target tokens stay at the right
+            input_ids[r, offset:] = torch.as_tensor(
+                toks, dtype=torch.long, device=device,
+            )
+            labels[r, offset:] = torch.as_tensor(
+                lbls, dtype=torch.long, device=device,
+            )
+        attn_mask = (input_ids != pad_id).long()
+
+        out = model(input_ids=input_ids, attention_mask=attn_mask)
+        logits = out["logits"] if isinstance(out, dict) else out.logits
+
+        shift_logits = logits[:, :-1, :].contiguous()
+        shift_labels = labels[:, 1:].contiguous()
+        V = shift_logits.size(-1)
+
+        per_tok = F.cross_entropy(
+            shift_logits.reshape(-1, V).float(),
+            shift_labels.reshape(-1),
+            ignore_index=-100,
+            reduction="none",
+        ).view(B, -1)
+        valid = (shift_labels != -100).to(per_tok.dtype)
+        denom = valid.sum(dim=1).clamp(min=1.0)
+        per_ex_mean = (per_tok * valid).sum(dim=1) / denom
+
+        if backward:
+            is_last = (bi == n_micro - 1)
+            (per_ex_mean.sum() / n_total).backward(retain_graph=not is_last)
+
+        loss_accum_val += per_ex_mean.detach().sum().item()
+
+    return loss_accum_val / n_total
+
+
+# ---------------------------------------------------------------------------
+# Per-repo precompute cache (diff embeddings + tokenized assertions)
+# ---------------------------------------------------------------------------
+
+def _precompute_repo_cache(
+    data: List[Dict[str, Any]],
+    tokenizer: AutoTokenizer,
+    max_seq_len: int,
+    diff_embedder: "DiffEmbedder",
+    log_prefix: str = "",
+) -> None:
+    """Populate each repo in ``data`` with:
+
+    * ``diff_embs``: a ``[N_commits, 2*D]`` fp16 tensor on CPU. Re-used
+      for every epoch and every eval call (the embedder is frozen).
+    * ``tokenized_by_commit``: same layout as ``assertions_by_commit``
+      but each ``(prefix, target)`` tuple is replaced by a dict with
+      ``tokens`` / ``labels`` as numpy int32 arrays, already truncated
+      to ``max_seq_len``. Tokenization happens once per assertion
+      instead of once per use.
+
+    The code path in :func:`get_assertions_up_to` is generic over the
+    per-commit payload, so passing ``tokenized_by_commit`` through the
+    same helper works with no downstream changes.
+    """
+    import numpy as np  # local to avoid polluting the module namespace
+
+    if not data:
+        return
+
+    total_commits = sum(len(r["commit_diffs"]) for r in data)
+    total_pairs = sum(
+        sum(len(v) for v in r["assertions_by_commit"].values()) for r in data
+    )
+    print(
+        f"{log_prefix}[CACHE] precomputing {total_commits} diff "
+        f"embeddings + {total_pairs} tokenized assertions..."
+    )
+    t0 = time.time()
+
+    for repo in data:
+        diffs = repo["commit_diffs"]
+        embs = []
+        with torch.no_grad():
+            for d in diffs:
+                embs.append(diff_embedder.embed_diff(d))  # [2*D] cpu fp32
+        if embs:
+            emb_tensor = torch.stack(embs, dim=0).to(torch.float16).contiguous()
+        else:
+            emb_tensor = torch.empty((0, diff_embedder.embed_dim), dtype=torch.float16)
+        repo["diff_embs"] = emb_tensor
+
+        tokenized_by_commit: Dict[int, List[Dict[str, Any]]] = {}
+        for ci, pairs in repo["assertions_by_commit"].items():
+            tok_list: List[Dict[str, Any]] = []
+            for (p, t) in pairs:
+                tl = prepare_tokens_and_labels(p, t, tokenizer)
+                tokens = tl["tokens"]
+                labels = tl["labels"]
+                if len(tokens) > max_seq_len:
+                    tokens = tokens[-max_seq_len:]
+                    labels = labels[-max_seq_len:]
+                tok_list.append({
+                    "tokens": np.asarray(tokens, dtype=np.int32),
+                    "labels": np.asarray(labels, dtype=np.int64),
+                })
+            tokenized_by_commit[ci] = tok_list
+        repo["tokenized_by_commit"] = tokenized_by_commit
+
+    elapsed = time.time() - t0
+    print(f"{log_prefix}[CACHE] done in {elapsed:.1f}s")
+
+
 # ---------------------------------------------------------------------------
 # Checkpointing
 # ---------------------------------------------------------------------------
@@ -407,6 +562,7 @@ def evaluate_commit_sequential(
     max_assertions_per_commit: int = 0,
     keep_splits: Optional[List[str]] = None,
     assertion_mode: str = "cumulative",
+    lm_micro_batch: int = 4,
 ) -> Dict[str, float]:
     """Run commit-sequential evaluation, returning average loss.
 
@@ -425,6 +581,7 @@ def evaluate_commit_sequential(
     total_commits_with_loss = 0
     total_assertions_evaluated = 0
 
+    pad_id = tokenizer.pad_token_id
     for repo_item in eval_data:
         h = code2lora_gru.compute_h0(
             batch_size=1, device=device, dtype=torch.float32,
@@ -433,18 +590,37 @@ def evaluate_commit_sequential(
         repo_n = 0
 
         splits_by_commit = repo_item.get("assertion_splits")
+        diff_embs = repo_item.get("diff_embs")  # precomputed, optional
+        tok_by_commit = repo_item.get("tokenized_by_commit")
 
         for k, diff_text in enumerate(repo_item["commit_diffs"]):
             ci = repo_item["commit_indices"][k]
-            diff_emb = diff_embedder.embed_diff(diff_text).unsqueeze(0).to(device=device, dtype=torch.float32)
+            if diff_embs is not None:
+                diff_emb = diff_embs[k].unsqueeze(0).to(
+                    device=device, dtype=torch.float32, non_blocking=True,
+                )
+            else:
+                diff_emb = diff_embedder.embed_diff(diff_text).unsqueeze(0).to(
+                    device=device, dtype=torch.float32,
+                )
             h = code2lora_gru.encode_repository_commit(diff_emb, h)
 
-            assertions = get_assertions_up_to(
-                repo_item["assertions_by_commit"], ci,
-                splits_by_commit=splits_by_commit,
-                keep_splits=keep_splits,
-                mode=assertion_mode,
-            )
+            # Operate on pretokenized items when available; fall back to raw
+            # (prefix, target) tuples + the legacy per-assertion loss fn.
+            if tok_by_commit is not None:
+                assertions = get_assertions_up_to(
+                    tok_by_commit, ci,
+                    splits_by_commit=splits_by_commit,
+                    keep_splits=keep_splits,
+                    mode=assertion_mode,
+                )
+            else:
+                assertions = get_assertions_up_to(
+                    repo_item["assertions_by_commit"], ci,
+                    splits_by_commit=splits_by_commit,
+                    keep_splits=keep_splits,
+                    mode=assertion_mode,
+                )
             if not assertions:
                 continue
 
@@ -456,9 +632,15 @@ def evaluate_commit_sequential(
                 continue
 
             hooks = apply_lora_hooks(target_modules_dict, lora_params, scaling)
-            avg_loss = compute_lm_loss_batch(
-                base_model, assertions, tokenizer, max_seq_len, device,
-            )
+            if tok_by_commit is not None:
+                avg_loss = compute_lm_loss_micro_batched(
+                    base_model, assertions, pad_id, device,
+                    micro_batch=lm_micro_batch, backward=False,
+                )
+            else:
+                avg_loss = compute_lm_loss_batch(
+                    base_model, assertions, tokenizer, max_seq_len, device,
+                )
             remove_lora_hooks(hooks)
 
             if avg_loss is not None:
@@ -497,6 +679,7 @@ def _run_eval_suite(
     tag_prefix: str,
     global_step: int,
     assertion_mode: str = "cumulative",
+    lm_micro_batch: int = 4,
 ) -> Tuple[Dict[str, float], float]:
     """Evaluate each suite in ``eval_suites`` and return a flattened dict
     keyed like ``f"{tag_prefix}/{suite_name}/{metric}"`` together with the
@@ -515,6 +698,7 @@ def _run_eval_suite(
             max_assertions_per_commit=max_assertions_per_commit,
             keep_splits=keep_splits,
             assertion_mode=assertion_mode,
+            lm_micro_batch=lm_micro_batch,
         )
         for k, v in m.items():
             metrics[f"{tag_prefix}/{name}/{k}"] = v
@@ -573,6 +757,8 @@ def train_commit_sequential(
     best_eval_loss = float("inf")
     max_seq_len = args.max_seq_len
     max_assertions_per_commit = args.max_assertions_per_commit
+    lm_micro_batch = max(int(getattr(args, "lm_micro_batch", 4)), 1)
+    pad_id = tokenizer.pad_token_id
     train_keep_splits = (
         list(args.train_in_repo_splits) if args.train_in_repo_splits else None
     )
@@ -604,6 +790,8 @@ def train_commit_sequential(
             commit_indices = repo_item["commit_indices"]
             assertions_by_commit = repo_item["assertions_by_commit"]
             splits_by_commit = repo_item.get("assertion_splits")
+            diff_embs = repo_item.get("diff_embs")
+            tok_by_commit = repo_item.get("tokenized_by_commit")
             n_commits = len(commit_diffs)
 
             h = code2lora_gru.compute_h0(
@@ -615,17 +803,32 @@ def train_commit_sequential(
 
             for k in range(n_commits):
                 ci = commit_indices[k]
-                diff_text = commit_diffs[k]
 
-                diff_emb = diff_embedder.embed_diff(diff_text).unsqueeze(0).to(device=device, dtype=torch.float32)
+                if diff_embs is not None:
+                    diff_emb = diff_embs[k].unsqueeze(0).to(
+                        device=device, dtype=torch.float32, non_blocking=True,
+                    )
+                else:
+                    diff_text = commit_diffs[k]
+                    diff_emb = diff_embedder.embed_diff(diff_text).unsqueeze(0).to(
+                        device=device, dtype=torch.float32,
+                    )
                 h = code2lora_gru.encode_repository_commit(diff_emb, h)
 
-                assertions = get_assertions_up_to(
-                    assertions_by_commit, ci,
-                    splits_by_commit=splits_by_commit,
-                    keep_splits=train_keep_splits,
-                    mode=args.assertion_mode,
-                )
+                if tok_by_commit is not None:
+                    assertions = get_assertions_up_to(
+                        tok_by_commit, ci,
+                        splits_by_commit=splits_by_commit,
+                        keep_splits=train_keep_splits,
+                        mode=args.assertion_mode,
+                    )
+                else:
+                    assertions = get_assertions_up_to(
+                        assertions_by_commit, ci,
+                        splits_by_commit=splits_by_commit,
+                        keep_splits=train_keep_splits,
+                        mode=args.assertion_mode,
+                    )
                 if not assertions:
                     h = h.detach()
                     continue
@@ -639,10 +842,16 @@ def train_commit_sequential(
                     continue
 
                 hooks = apply_lora_hooks(target_modules_dict, lora_params, scaling)
-                avg_loss = compute_lm_loss_batch(
-                    base_model, assertions, tokenizer, max_seq_len, device,
-                    backward=True,
-                )
+                if tok_by_commit is not None:
+                    avg_loss = compute_lm_loss_micro_batched(
+                        base_model, assertions, pad_id, device,
+                        micro_batch=lm_micro_batch, backward=True,
+                    )
+                else:
+                    avg_loss = compute_lm_loss_batch(
+                        base_model, assertions, tokenizer, max_seq_len, device,
+                        backward=True,
+                    )
                 remove_lora_hooks(hooks)
 
                 if avg_loss is not None:
@@ -711,6 +920,7 @@ def train_commit_sequential(
                     target_modules_dict, tokenizer, max_seq_len, device,
                     max_assertions_per_commit, "eval", global_step,
                     assertion_mode=args.assertion_mode,
+                    lm_micro_batch=lm_micro_batch,
                 )
                 _log_eval_metrics(eval_metrics, global_step)
 
@@ -773,6 +983,7 @@ def train_commit_sequential(
                 target_modules_dict, tokenizer, max_seq_len, device,
                 max_assertions_per_commit, "eval_epoch", global_step,
                 assertion_mode=args.assertion_mode,
+                lm_micro_batch=lm_micro_batch,
             )
             _log_eval_metrics(eval_metrics, global_step)
             if sel_loss < best_eval_loss:
@@ -903,6 +1114,16 @@ def main():
         type=int,
         default=0,
         help="Max assertions per commit step (0 = use all cumulative assertions at that commit)",
+    )
+    ap.add_argument(
+        "--lm-micro-batch",
+        type=int,
+        default=4,
+        help=(
+            "Assertions forwarded together in one LM call. Each micro-batch "
+            "is padded only to its longest member, so this controls the "
+            "per-step throughput / memory trade-off. 1 = legacy behavior."
+        ),
     )
     ap.add_argument("--grad-accum", type=int, default=1,
                     help="Number of repos between optimizer steps")
@@ -1061,7 +1282,7 @@ def main():
     embed_model = AutoModel.from_pretrained(
         args.embed_model,
         trust_remote_code=True,
-        torch_dtype=torch.float16,
+        torch_dtype=torch.bfloat16,
     ).to("cuda:0").eval()
     for p in embed_model.parameters():
         p.requires_grad = False
@@ -1146,6 +1367,28 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
 
+    # ── Precompute per-repo caches ────────────────────────────────────────
+    # 1) Diff embeddings: embedder is frozen, so running it once per diff
+    #    (vs once per epoch + once per eval_steps) removes the biggest
+    #    redundant compute in both train and eval.
+    # 2) Tokenized assertions: prepare_tokens_and_labels is called once per
+    #    (prefix, target) pair; in cumulative mode the same pair can appear
+    #    in the loss at many commits, so tokenizing per-use was wasteful.
+    _precompute_repo_cache(
+        train_data, tok, args.max_seq_len, diff_embedder, log_prefix="  train "
+    )
+    seen_ids: set = set()
+    seen_ids.update(id(r) for r in train_data)  # skip dups that share repos
+    for name, suite in eval_suites.items():
+        data = suite.get("data") or []
+        fresh = [r for r in data if id(r) not in seen_ids]
+        if fresh:
+            _precompute_repo_cache(
+                fresh, tok, args.max_seq_len, diff_embedder,
+                log_prefix=f"  {name} ",
+            )
+            seen_ids.update(id(r) for r in fresh)
+
     # ── Initial eval ──
     if eval_suites and not args.no_initial_eval:
         print("\nInitial eval...")
@@ -1154,6 +1397,7 @@ def main():
             target_modules_dict, tok, args.max_seq_len, device,
             args.max_assertions_per_commit, "eval_init", 0,
             assertion_mode=args.assertion_mode,
+            lm_micro_batch=args.lm_micro_batch,
         )
         _log_eval_metrics(init_metrics, 0)
     elif eval_suites and args.no_initial_eval:

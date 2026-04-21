@@ -26,6 +26,7 @@ EVAL_STEPS="${EVAL_STEPS:-100}"
 SAVE_STEPS="${SAVE_STEPS:-100}"
 LIMIT_TRAIN_REPOS="${LIMIT_TRAIN_REPOS:-0}"         # 0 = no limit
 LIMIT_EVAL_REPOS="${LIMIT_EVAL_REPOS:-64}"          # cap held-out eval size
+LM_MICRO_BATCH="${LM_MICRO_BATCH:-4}"               # assertions per LM forward
 
 EXTRA_ARGS=()
 if [ "$LIMIT_TRAIN_REPOS" != "0" ]; then
@@ -45,6 +46,7 @@ echo "Grad accum:              $GRAD_ACCUM"
 echo "Learning rate:           $LR"
 echo "Limit train repos:       $LIMIT_TRAIN_REPOS"
 echo "Limit eval repos:        $LIMIT_EVAL_REPOS"
+echo "LM micro-batch:          $LM_MICRO_BATCH"
 echo "Start: $(date)"
 
 python hypernetwork/train_code2lora_gru_commits.py \
@@ -72,6 +74,7 @@ python hypernetwork/train_code2lora_gru_commits.py \
     --cross-repo-eval-splits cr_val cr_test \
     --assertion-mode "$ASSERTION_MODE" \
     --max-assertions-per-commit "$MAX_ASSERTIONS_PER_COMMIT" \
+    --lm-micro-batch "$LM_MICRO_BATCH" \
     --grad-accum "$GRAD_ACCUM" \
     --lr "$LR" \
     --weight-decay 0.01 \
