@@ -28,6 +28,12 @@ export BASELINES_DIR="${SCRATCH:-$HOME/scratch}/repopeft_baselines"
 # Populated by scripts/watgpu/setup_commit_dataset.sh.
 export COMMIT_DATA_DIR="$DATA_ROOT/commit_parquet_hf"
 
+# Cache dir for precomputed per-repo diff embeddings + tokenized assertions.
+# Files are keyed by (embed_model, model_name, max_seq_len, chunk_tokens, ...)
+# so different configs don't collide. Reused across runs to avoid the 1-hour
+# cache build (see _precompute_repo_cache in train_code2lora_gru_commits.py).
+export COMMIT_CACHE_DIR="${COMMIT_CACHE_DIR:-$DATA_ROOT/commit_cache}"
+
 # Cache dirs so heavyweight downloads live on scratch (not $HOME quota).
 export HF_HOME="${HF_HOME:-$DATA_ROOT/.hf_cache}"
 export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-$HF_HOME/hub}"

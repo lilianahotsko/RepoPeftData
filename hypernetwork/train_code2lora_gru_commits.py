@@ -168,6 +168,49 @@ class DiffEmbedder:
         chunk_embs = self._embed_texts(chunks)  # [K, D] on CPU fp32
         return pool_file_chunks_maxmean(chunk_embs)  # [2*D]
 
+    @torch.no_grad()
+    def embed_diffs_batched(self, diff_texts: List[str]) -> torch.Tensor:
+        """Embed a list of diffs in one go, flattening chunks across diffs
+        into the biggest possible embedder batches.
+
+        Returns a ``[N, 2*D]`` CPU fp32 tensor. ~20–50× faster than looping
+        :meth:`embed_diff` per-diff when the embedder is GPU-bound and each
+        diff has few chunks (which is the common case for commits).
+        """
+        n = len(diff_texts)
+        if n == 0:
+            return torch.empty((0, 2 * self._embed_dim))
+
+        per_diff_chunks: List[List[str]] = []
+        counts: List[int] = []
+        for text in diff_texts:
+            if not text or not text.strip():
+                per_diff_chunks.append([])
+                counts.append(0)
+                continue
+            chunks = _make_text_chunks(
+                self.tokenizer, text, self.chunk_tokens, self.overlap,
+            )
+            per_diff_chunks.append(chunks)
+            counts.append(len(chunks))
+
+        flat_chunks: List[str] = [c for chunks in per_diff_chunks for c in chunks]
+        if flat_chunks:
+            flat_embs = self._embed_texts(flat_chunks)  # [sum_K, D] cpu fp32
+        else:
+            flat_embs = torch.empty((0, self._embed_dim))
+
+        out: List[torch.Tensor] = []
+        idx = 0
+        for k in counts:
+            if k == 0:
+                out.append(self._zero.clone())
+            else:
+                chunk_embs = flat_embs[idx : idx + k]
+                out.append(pool_file_chunks_maxmean(chunk_embs))
+                idx += k
+        return torch.stack(out, dim=0)
+
 
 # ---------------------------------------------------------------------------
 # Data loading from SQLite DB
@@ -446,12 +489,79 @@ def compute_lm_loss_micro_batched(
 # Per-repo precompute cache (diff embeddings + tokenized assertions)
 # ---------------------------------------------------------------------------
 
+_CACHE_FORMAT_VERSION = "v2"
+
+
+def _global_cache_fingerprint(
+    embedder_name: str,
+    tokenizer_name: str,
+    max_seq_len: int,
+    chunk_tokens: int,
+    overlap: int,
+    embedder_max_length: int,
+) -> str:
+    """Stable fingerprint for all settings that affect cache contents.
+
+    Mismatched fingerprints mean the cached tensors/tokens are no longer
+    valid for the current config, so we bucket cache files by this value.
+    """
+    import hashlib
+
+    key = (
+        f"{_CACHE_FORMAT_VERSION}|emb={embedder_name}|tok={tokenizer_name}|"
+        f"msl={max_seq_len}|ct={chunk_tokens}|ov={overlap}|eml={embedder_max_length}"
+    )
+    return hashlib.sha256(key.encode()).hexdigest()[:16]
+
+
+def _repo_content_fingerprint(repo: Dict[str, Any]) -> str:
+    """Cheap, deterministic content hash used to invalidate a per-repo cache
+    file when the underlying diffs/assertions have changed.
+
+    We don't hash every diff (too slow for 5k commits); we hash the counts
+    plus a sampled prefix of the first/last few diffs, which is enough to
+    detect any realistic data change.
+    """
+    import hashlib
+
+    h = hashlib.sha256()
+    diffs = repo.get("commit_diffs") or []
+    h.update(f"n_commits={len(diffs)}".encode())
+    for d in diffs[:4]:
+        h.update(b"|d|")
+        h.update((d or "").encode("utf-8", errors="replace")[:4096])
+    for d in diffs[-2:]:
+        h.update(b"|t|")
+        h.update((d or "").encode("utf-8", errors="replace")[:4096])
+
+    apc: Dict[int, Any] = repo.get("assertions_by_commit") or {}
+    total_pairs = sum(len(v) for v in apc.values())
+    h.update(f"|n_pairs={total_pairs}".encode())
+    keys = sorted(apc.keys())
+    if keys:
+        h.update(f"|first_ci={keys[0]}|last_ci={keys[-1]}".encode())
+        # Hash the first pair at a few commits to catch content changes.
+        sample_cis = [keys[0], keys[len(keys) // 2], keys[-1]]
+        for ci in sample_cis:
+            pairs = apc.get(ci) or []
+            if pairs:
+                pfx, tgt = pairs[0]
+                h.update(b"|p|")
+                h.update((pfx or "").encode("utf-8", errors="replace")[:1024])
+                h.update(b"|g|")
+                h.update((tgt or "").encode("utf-8", errors="replace")[:1024])
+    return h.hexdigest()[:16]
+
+
 def _precompute_repo_cache(
     data: List[Dict[str, Any]],
     tokenizer: AutoTokenizer,
     max_seq_len: int,
     diff_embedder: "DiffEmbedder",
     log_prefix: str = "",
+    cache_dir: Optional[Path] = None,
+    embedder_name: str = "",
+    tokenizer_name: str = "",
 ) -> None:
     """Populate each repo in ``data`` with:
 
@@ -463,6 +573,13 @@ def _precompute_repo_cache(
       to ``max_seq_len``. Tokenization happens once per assertion
       instead of once per use.
 
+    Perf notes:
+    * Diffs are embedded via :meth:`DiffEmbedder.embed_diffs_batched`, which
+      flattens chunks across all commits of a repo into one embedder call.
+    * When ``cache_dir`` is provided, each repo's cache is persisted as
+      ``<cache_dir>/commit_cache_<global_fp>/<repo_id>.pt`` keyed by a
+      content fingerprint. Subsequent runs reload in milliseconds.
+
     The code path in :func:`get_assertions_up_to` is generic over the
     per-commit payload, so passing ``tokenized_by_commit`` through the
     same helper works with no downstream changes.
@@ -472,26 +589,69 @@ def _precompute_repo_cache(
     if not data:
         return
 
+    global_fp = _global_cache_fingerprint(
+        embedder_name=embedder_name,
+        tokenizer_name=tokenizer_name,
+        max_seq_len=max_seq_len,
+        chunk_tokens=diff_embedder.chunk_tokens,
+        overlap=diff_embedder.overlap,
+        embedder_max_length=diff_embedder.max_length,
+    )
+    repo_cache_dir: Optional[Path] = None
+    if cache_dir is not None:
+        repo_cache_dir = Path(cache_dir) / f"commit_cache_{global_fp}"
+        try:
+            repo_cache_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            print(f"{log_prefix}[CACHE] cannot create {repo_cache_dir}: {e}; disabling disk cache")
+            repo_cache_dir = None
+
     total_commits = sum(len(r["commit_diffs"]) for r in data)
     total_pairs = sum(
         sum(len(v) for v in r["assertions_by_commit"].values()) for r in data
     )
     print(
         f"{log_prefix}[CACHE] precomputing {total_commits} diff "
-        f"embeddings + {total_pairs} tokenized assertions..."
+        f"embeddings + {total_pairs} tokenized assertions "
+        f"(cache_dir={repo_cache_dir})..."
     )
     t0 = time.time()
 
+    loaded_from_disk = 0
+    rebuilt = 0
+
     for repo in data:
+        repo_id = repo.get("repo_id", "")
+        content_fp = _repo_content_fingerprint(repo)
+
+        cache_file: Optional[Path] = None
+        if repo_cache_dir is not None and repo_id:
+            safe_id = repo_id.replace("/", "__").replace("\\", "__")
+            cache_file = repo_cache_dir / f"{safe_id}.pt"
+            if cache_file.exists():
+                try:
+                    payload = torch.load(
+                        cache_file, map_location="cpu", weights_only=False,
+                    )
+                    if payload.get("content_fp") == content_fp:
+                        repo["diff_embs"] = payload["diff_embs"]
+                        repo["tokenized_by_commit"] = payload["tokenized_by_commit"]
+                        loaded_from_disk += 1
+                        continue
+                except Exception as e:
+                    print(
+                        f"{log_prefix}[CACHE] failed to load {cache_file} "
+                        f"({e}); rebuilding"
+                    )
+
         diffs = repo["commit_diffs"]
-        embs = []
-        with torch.no_grad():
-            for d in diffs:
-                embs.append(diff_embedder.embed_diff(d))  # [2*D] cpu fp32
-        if embs:
-            emb_tensor = torch.stack(embs, dim=0).to(torch.float16).contiguous()
+        if diffs:
+            emb_tensor_2d = diff_embedder.embed_diffs_batched(diffs)  # [N, 2*D]
+            emb_tensor = emb_tensor_2d.to(torch.float16).contiguous()
         else:
-            emb_tensor = torch.empty((0, diff_embedder.embed_dim), dtype=torch.float16)
+            emb_tensor = torch.empty(
+                (0, diff_embedder.embed_dim), dtype=torch.float16,
+            )
         repo["diff_embs"] = emb_tensor
 
         tokenized_by_commit: Dict[int, List[Dict[str, Any]]] = {}
@@ -510,9 +670,28 @@ def _precompute_repo_cache(
                 })
             tokenized_by_commit[ci] = tok_list
         repo["tokenized_by_commit"] = tokenized_by_commit
+        rebuilt += 1
+
+        if cache_file is not None:
+            tmp_file = cache_file.with_suffix(".pt.tmp")
+            try:
+                torch.save(
+                    {
+                        "content_fp": content_fp,
+                        "diff_embs": emb_tensor,
+                        "tokenized_by_commit": tokenized_by_commit,
+                    },
+                    tmp_file,
+                )
+                tmp_file.replace(cache_file)
+            except Exception as e:
+                print(f"{log_prefix}[CACHE] failed to save {cache_file}: {e}")
 
     elapsed = time.time() - t0
-    print(f"{log_prefix}[CACHE] done in {elapsed:.1f}s")
+    print(
+        f"{log_prefix}[CACHE] done in {elapsed:.1f}s "
+        f"(loaded_from_disk={loaded_from_disk}, rebuilt={rebuilt})"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1048,6 +1227,18 @@ def main():
 
     ap.add_argument("--splits-dir", type=str, default=default_dataset,
                     help="Split JSONs dir (only used by the legacy DB backend).")
+    ap.add_argument(
+        "--cache-dir",
+        type=str,
+        default=os.environ.get("COMMIT_CACHE_DIR", ""),
+        help=(
+            "Directory for the per-repo embedding+tokenization cache. "
+            "Cached files are keyed by (embed_model, model_name, max_seq_len, "
+            "chunk_tokens, overlap, embedder_max_length) so different configs "
+            "don't collide. Set to empty / 'none' / 'off' to disable disk caching. "
+            "Default: $COMMIT_CACHE_DIR (if set), else disabled."
+        ),
+    )
     ap.add_argument("--limit-train-repos", type=int, default=None)
     ap.add_argument("--limit-eval-repos", type=int, default=None)
 
@@ -1374,8 +1565,16 @@ def main():
     # 2) Tokenized assertions: prepare_tokens_and_labels is called once per
     #    (prefix, target) pair; in cumulative mode the same pair can appear
     #    in the loss at many commits, so tokenizing per-use was wasteful.
+    # 3) On-disk cache (args.cache_dir) so re-runs don't repeat the work.
+    cache_dir_path: Optional[Path] = None
+    if args.cache_dir and args.cache_dir.lower() not in {"", "none", "off"}:
+        cache_dir_path = Path(args.cache_dir)
     _precompute_repo_cache(
-        train_data, tok, args.max_seq_len, diff_embedder, log_prefix="  train "
+        train_data, tok, args.max_seq_len, diff_embedder,
+        log_prefix="  train ",
+        cache_dir=cache_dir_path,
+        embedder_name=args.embed_model,
+        tokenizer_name=args.model_name,
     )
     seen_ids: set = set()
     seen_ids.update(id(r) for r in train_data)  # skip dups that share repos
@@ -1386,6 +1585,9 @@ def main():
             _precompute_repo_cache(
                 fresh, tok, args.max_seq_len, diff_embedder,
                 log_prefix=f"  {name} ",
+                cache_dir=cache_dir_path,
+                embedder_name=args.embed_model,
+                tokenizer_name=args.model_name,
             )
             seen_ids.update(id(r) for r in fresh)
 
