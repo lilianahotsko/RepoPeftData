@@ -33,6 +33,11 @@
 source scripts/watgpu/common.sh
 mkdir -p slurm_logs
 
+# Force line-buffered stdout so cache-precompute progress, step logs, etc.
+# show up live in the slurm .out file (and in `tee` pipes for interactive runs)
+# instead of being stuck in Python's 8 KB block buffer.
+export PYTHONUNBUFFERED=1
+
 PARQUET_DIR="${PARQUET_DIR:-$COMMIT_DATA_DIR}"
 PARQUET_PREFER="${PARQUET_PREFER:-hf}"
 SUFFIX="${SUFFIX:-parquet_hf}"
