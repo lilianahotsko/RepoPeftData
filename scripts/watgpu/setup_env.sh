@@ -22,14 +22,15 @@ echo "=========================================="
 # ── 1. Create venv ──
 if [ ! -d "$VENV_DIR" ]; then
     echo -e "\n>>> Creating venv..."
-    module purge
+    module purge 2>/dev/null || true
     module load python/3.12 cuda/12.6 2>/dev/null || true
-    python -m venv "$VENV_DIR"
+    python3 -m venv "$VENV_DIR"
     source "$VENV_DIR/bin/activate"
     pip install --upgrade pip
     pip install torch transformers peft datasets accelerate \
                 bitsandbytes wandb huggingface_hub codebleu \
-                sentencepiece protobuf pyarrow
+                sentencepiece protobuf pyarrow \
+                trl safetensors
     echo "Venv created."
 else
     echo -e "\n>>> Venv already exists, activating..."

@@ -29,7 +29,7 @@ if [ ! -d "$VENV_DIR" ]; then
     exit 1
 fi
 
-module purge
+module purge 2>/dev/null || true
 module load python/3.12 cuda/12.6 2>/dev/null || true
 source "$VENV_DIR/bin/activate"
 

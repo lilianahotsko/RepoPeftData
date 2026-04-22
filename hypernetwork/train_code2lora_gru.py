@@ -368,6 +368,12 @@ def apply_lora_hooks(target_modules_dict, lora_params, scaling):
                 x = inp[0]
                 _Ac = _A.to(dtype=x.dtype)
                 _Bc = _B.to(dtype=x.dtype)
+                # Broadcast the single-LoRA batch dim to x when the LM is
+                # forwarded with micro-batch > 1 (same LoRA applied per token
+                # across all batch entries).
+                if _Ac.size(0) == 1 and x.size(0) != 1:
+                    _Ac = _Ac.expand(x.size(0), -1, -1)
+                    _Bc = _Bc.expand(x.size(0), -1, -1)
                 delta = torch.bmm(
                     torch.bmm(x, _Ac.transpose(1, 2)),
                     _Bc.transpose(1, 2),

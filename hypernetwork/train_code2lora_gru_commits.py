@@ -1038,7 +1038,7 @@ def main():
     ap.add_argument("--qna-parquet", type=str, default=None,
                     help="Explicit path to qna_pairs.parquet (overrides --parquet-dir).")
     ap.add_argument("--parquet-prefer", type=str, default="auto",
-                    choices=["auto", "concat", "shards"],
+                    choices=["auto", "concat", "shards", "hf"],
                     help="Which parquet layout to read from inside --parquet-dir.")
     ap.add_argument("--db-path", type=str, default=default_db,
                     help="[Legacy] Path to commits_assertions.db (SQLite).")
@@ -1307,7 +1307,7 @@ def main():
         args.model_name,
         trust_remote_code=True,
         torch_dtype=torch.bfloat16,
-        attn_implementation="flash_attention_2",
+        attn_implementation="sdpa",
         device_map={"": "cuda:0"},
     )
     for p in base_model.parameters():
