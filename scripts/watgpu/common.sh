@@ -34,12 +34,22 @@ export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-$HF_HOME/hub}"
 export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$HF_HOME/hub}"
 mkdir -p "$HF_HOME"
 
-# cd to repo root. SLURM copies sbatch scripts into its spool dir so
-# $0 is unreliable inside jobs; prefer $SLURM_SUBMIT_DIR, then BASH_SOURCE.
-if [ -n "${SLURM_SUBMIT_DIR:-}" ] && [ -d "$SLURM_SUBMIT_DIR" ]; then
+# cd to repo root.
+#   * BASH_SOURCE[0] is the exact path of this file as it was sourced, so
+#     it works for both sbatch (cwd=$SLURM_SUBMIT_DIR=repo root) and for
+#     interactive `srun --pty ... bash` shells.
+#   * SLURM_SUBMIT_DIR is only a safe fallback when it actually contains the
+#     repo. `srun --pty bash` from $HOME sets SLURM_SUBMIT_DIR=$HOME, which
+#     is NOT the repo root, so we must validate it.
+_SELF="${BASH_SOURCE[0]:-$0}"
+if [ -n "$_SELF" ] && [ -f "$_SELF" ]; then
+    cd "$(cd "$(dirname "$_SELF")" && pwd)/../.."
+elif [ -n "${SLURM_SUBMIT_DIR:-}" ] && [ -d "$SLURM_SUBMIT_DIR/hypernetwork" ]; then
     cd "$SLURM_SUBMIT_DIR"
-elif [ -n "${BASH_SOURCE[0]:-}" ]; then
-    cd "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../.."
+else
+    echo "ERROR: common.sh cannot locate repo root (BASH_SOURCE='$_SELF', SLURM_SUBMIT_DIR='${SLURM_SUBMIT_DIR:-}')" >&2
+    exit 1
 fi
+unset _SELF
 
 mkdir -p "$CKPT_DIR" "$BASELINES_DIR" slurm_logs
