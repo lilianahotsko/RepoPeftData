@@ -18,6 +18,7 @@ consumed by ``train_code2lora_gru_commits.py``:
         "assertions_by_commit": Dict[int, List[(prefix, target)]],
         "assertion_splits":     Dict[int, List[str]], # mirrors assertions_by_commit
         "max_commit_index":     int,
+        "_lazy_qna_spec":       optional; present when deferring QnA load (HF/concat)
     }
 
 The loader supports:
@@ -87,6 +88,10 @@ _QNA_COLS = [
     "prefix",
     "target",
 ]
+
+# When ``defer_qna_materialization=True`` (concat/HF layout), each item may
+# carry ``_lazy_qna_spec`` until :func:`materialize_lazy_qna_for_repo` runs.
+LAZY_QNA_SPEC_KEY = "_lazy_qna_spec"
 
 
 def _require_pyarrow() -> None:
@@ -274,6 +279,152 @@ def _read_single_parquet(
         return _apply_mask_filter(t, filters)
 
 
+def _append_qna_batch_to_map(
+    assertions_by_rc: Dict[Tuple[str, int], List[Tuple[str, str, str]]],
+    batch: "pa.RecordBatch",
+) -> None:
+    """Merge one Arrow record batch into ``assertions_by_rc`` (prefix/target
+    validation matches the eager QnA table path in the parquet loader).
+    """
+    q_repo = batch.column("repo_id").to_pylist()
+    q_ci = batch.column("commit_index").to_pylist()
+    q_in = batch.column("in_repo_split").to_pylist()
+    q_prefix = batch.column("prefix").to_pylist()
+    q_target = batch.column("target").to_pylist()
+    for j in range(batch.num_rows):
+        prefix = q_prefix[j]
+        target = q_target[j]
+        if not prefix or not target:
+            continue
+        if str(target).lstrip().startswith(","):
+            continue
+        assertions_by_rc[(q_repo[j], int(q_ci[j]))].append(
+            (q_in[j], prefix, target),
+        )
+
+
+def _merge_qna_parquet_table_into(
+    assertions_by_rc: Dict[Tuple[str, int], List[Tuple[str, str, str]]],
+    qtab: "pa.Table",
+) -> None:
+    if qtab.num_rows == 0:
+        return
+    q_repo = qtab.column("repo_id").to_pylist()
+    q_ci = qtab.column("commit_index").to_pylist()
+    q_in = qtab.column("in_repo_split").to_pylist()
+    q_prefix = qtab.column("prefix").to_pylist()
+    q_target = qtab.column("target").to_pylist()
+    for j in range(qtab.num_rows):
+        prefix = q_prefix[j]
+        target = q_target[j]
+        if not prefix or not target:
+            continue
+        if str(target).lstrip().startswith(","):
+            continue
+        assertions_by_rc[(q_repo[j], int(q_ci[j]))].append(
+            (q_in[j], prefix, target),
+        )
+
+
+def materialize_lazy_qna_for_repo(repo: Dict[str, Any]) -> None:
+    """Fill ``assertions_by_commit`` / ``assertion_splits`` from Parquet for
+    one repo, consuming ``_lazy_qna_spec``.
+
+    Used so the concat/HF layout never holds every training QnA row in RAM at
+    once: call this once per repo immediately before embedding/tokenization
+    (e.g. inside the trainer's cache precompute loop).
+    """
+    spec = repo.pop(LAZY_QNA_SPEC_KEY, None)
+    if spec is None:
+        return
+
+    rid = repo["repo_id"]
+    qna_paths: Tuple[Path, ...] = tuple(Path(p) for p in spec["qna_paths"])
+    cross_set: Set[str] = set(spec["cross_repo_splits"])
+    in_tuple = spec.get("in_repo_splits")
+    in_set: Optional[Set[str]] = (
+        None if in_tuple is None else set(in_tuple)
+    )
+
+    assertions_by_rc: Dict[Tuple[str, int], List[Tuple[str, str, str]]] = (
+        defaultdict(list)
+    )
+    qna_filters: List[Tuple[str, str, Any]] = [
+        ("cross_repo_split", "in", list(cross_set)),
+        ("repo_id", "=", rid),
+    ]
+    if in_set is not None:
+        qna_filters.append(("in_repo_split", "in", list(in_set)))
+    filt = _build_filter_expr(qna_filters)
+
+    _require_pyarrow()
+    for qp in qna_paths:
+        if not qp.exists():
+            continue
+        try:
+            ds = pads.dataset(str(qp), format="parquet")
+            scanner = ds.scanner(
+                filter=filt,
+                columns=list(_QNA_COLS),
+                batch_size=65536,
+            )
+            for rb in scanner.to_batches():
+                if rb.num_rows == 0:
+                    continue
+                _append_qna_batch_to_map(assertions_by_rc, rb)
+        except Exception:
+            qtab = _read_single_parquet(qp, _QNA_COLS, qna_filters)
+            _merge_qna_parquet_table_into(assertions_by_rc, qtab)
+
+    commit_indices = repo["commit_indices"]
+    assertions_by_commit: Dict[int, List[Tuple[str, str]]] = defaultdict(list)
+    assertion_splits: Dict[int, List[str]] = defaultdict(list)
+    for ci in commit_indices:
+        for (ins, pfx, tgt) in assertions_by_rc.get((rid, int(ci)), []):
+            assertions_by_commit[int(ci)].append((pfx, tgt))
+            assertion_splits[int(ci)].append(ins)
+
+    repo["assertions_by_commit"] = dict(assertions_by_commit)
+    repo["assertion_splits"] = dict(assertion_splits)
+
+
+def estimate_total_qna_rows(
+    sources: ParquetSources,
+    *,
+    cross_repo_splits: Iterable[str],
+    in_repo_splits: Optional[Iterable[str]] = None,
+    repo_ids: Optional[Sequence[str]] = None,
+) -> int:
+    """Row count for QnA rows matching the same filters as materialization.
+
+    Uses dataset predicate pushdown (no Python list of all strings).
+    """
+    _require_pyarrow()
+    cross_set = set(cross_repo_splits)
+    in_set: Optional[Set[str]] = (
+        set(in_repo_splits) if in_repo_splits is not None else None
+    )
+    filters: List[Tuple[str, str, Any]] = [
+        ("cross_repo_split", "in", list(cross_set)),
+    ]
+    if repo_ids is not None:
+        filters.append(("repo_id", "in", list(repo_ids)))
+    if in_set is not None:
+        filters.append(("in_repo_split", "in", list(in_set)))
+    filt = _build_filter_expr(filters)
+    total = 0
+    for p in sources.qna_paths:
+        if not Path(p).exists():
+            continue
+        ds = pads.dataset(str(p), format="parquet")
+        try:
+            total += int(ds.count_rows(filter=filt))
+        except Exception:
+            t = _read_single_parquet(Path(p), ["repo_id"], filters)
+            total += t.num_rows
+    return total
+
+
 def _probe_shard_cross_split(path: Path) -> Optional[str]:
     """Read a tiny slice of a per-repo shard to discover its cross_repo_split.
 
@@ -312,6 +463,7 @@ def load_commit_sequences_from_parquet(
     require_assertions: bool = True,
     shuffle_repos: bool = False,
     seed: int = 0,
+    defer_qna_materialization: bool = False,
 ) -> List[Dict[str, Any]]:
     """Load per-repo commit sequences + assertions from parquet shards.
 
@@ -332,8 +484,15 @@ def load_commit_sequences_from_parquet(
         Require at least this many kept commits for the repo to be returned.
     require_assertions:
         If True, drop repos with zero assertions after in-repo filtering.
+        Ignored for assertion emptiness when ``defer_qna_materialization`` is
+        True (assertions are filled later via :func:`materialize_lazy_qna_for_repo`).
     shuffle_repos:
         Shuffle returned list deterministically (``random.Random(seed)``).
+    defer_qna_materialization:
+        For concatenated / HF per-split layouts only: build repo items from
+        commits only and attach ``_lazy_qna_spec`` instead of loading all QnA
+        rows into RAM. Call :func:`materialize_lazy_qna_for_repo` per repo
+        before training/eval needs ``assertions_by_commit``.
 
     Returns
     -------
@@ -354,6 +513,9 @@ def load_commit_sequences_from_parquet(
     #   peak memory at one shard at a time.
     # * For "concat" source: read the whole concatenated table with pushdown.
     items: List[Dict[str, Any]] = []
+    eff_require_assertions = (
+        require_assertions and not defer_qna_materialization
+    )
 
     def _pair_shards() -> List[Tuple[Path, Path]]:
         """Zip commit/qna shard paths by base name."""
@@ -438,7 +600,7 @@ def load_commit_sequences_from_parquet(
                     assertions_by_commit[ci].append((pfx, tgt))
                     assertion_splits[ci].append(ins)
                     total_assertions += 1
-            if require_assertions and total_assertions == 0:
+            if eff_require_assertions and total_assertions == 0:
                 continue
             out.append({
                 "repo_id": rid,
@@ -523,25 +685,39 @@ def load_commit_sequences_from_parquet(
         # Drop everything from per_repo that we did not keep.
         per_repo = {rid: rec for rid, rec in per_repo.items() if rid in kept_repo_set}
 
-        qna_filters = [("cross_repo_split", "in", list(cross_set))]
-        # Always push a repo-id filter so a multi-GB qna/train.parquet is
-        # scanned row-group-by-row-group and only the matching rows are
-        # brought into memory.
-        if kept_repo_ids:
-            qna_filters.append(("repo_id", "in", kept_repo_ids))
-        elif repo_filter_set:
-            qna_filters.append(("repo_id", "in", list(repo_filter_set)))
-        if in_set is not None:
-            qna_filters.append(("in_repo_split", "in", list(in_set)))
-        qtab_list: List["pa.Table"] = []
-        for p in sources.qna_paths:
-            qtab_list.append(_read_single_parquet(p, _QNA_COLS, qna_filters))
-        qtab = (
-            qtab_list[0] if len(qtab_list) == 1
-            else pa.concat_tables(qtab_list, promote=True)
-        )
-        assertions_by_rc = _process_qna_table(qtab)
-        items.extend(_shape_items(per_repo, assertions_by_rc))
+        if defer_qna_materialization:
+            lazy_spec = {
+                "qna_paths": tuple(sources.qna_paths),
+                "cross_repo_splits": tuple(sorted(cross_set)),
+                "in_repo_splits": (
+                    None if in_set is None else tuple(sorted(in_set))
+                ),
+            }
+            for it in _shape_items(per_repo, {}):
+                it[LAZY_QNA_SPEC_KEY] = lazy_spec
+                items.append(it)
+        else:
+            qna_filters = [("cross_repo_split", "in", list(cross_set))]
+            # Always push a repo-id filter so a multi-GB qna/train.parquet is
+            # scanned row-group-by-row-group and only the matching rows are
+            # brought into memory.
+            if kept_repo_ids:
+                qna_filters.append(("repo_id", "in", kept_repo_ids))
+            elif repo_filter_set:
+                qna_filters.append(("repo_id", "in", list(repo_filter_set)))
+            if in_set is not None:
+                qna_filters.append(("in_repo_split", "in", list(in_set)))
+            qtab_list: List["pa.Table"] = []
+            for p in sources.qna_paths:
+                qtab_list.append(
+                    _read_single_parquet(p, _QNA_COLS, qna_filters),
+                )
+            qtab = (
+                qtab_list[0] if len(qtab_list) == 1
+                else pa.concat_tables(qtab_list, promote=True)
+            )
+            assertions_by_rc = _process_qna_table(qtab)
+            items.extend(_shape_items(per_repo, assertions_by_rc))
 
     items.sort(key=lambda x: x["repo_id"])
     if shuffle_repos:
@@ -587,6 +763,9 @@ __all__ = [
     "resolve_parquet_sources",
     "load_commit_sequences_from_parquet",
     "summarize_items",
+    "LAZY_QNA_SPEC_KEY",
+    "materialize_lazy_qna_for_repo",
+    "estimate_total_qna_rows",
     "SHARDS_SUBDIR",
     "COMMITS_FILENAME",
     "QNA_FILENAME",

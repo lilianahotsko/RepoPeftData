@@ -541,3 +541,22 @@ Used in train:
 Aq1: traning on this commit structure 
 Aq2: accuracy getting lower after many commits 
 Aq3 : also using file qna split 
+
+
+
+- update the stats for the papaer table 
+- define which commits are kept (new qnas for commit -> added and updated qnas)
+
+- each repo - y/x - commits - which have the test files in there  (number of qnas - y)
+1) for each repo have the separate figure of how many test qnas
+2) instead of the normalized timeline - use the real one 
+
+3) new image - all the repos with dots(changing size based on how many qnas are in the commits)
+- each commit => 0 test files 
+
+
+
+
+
+- collect extra repos with start data from the 2025+ (and are not the fork of any other repos that are already in the training set) - out-of-distribution set 
+

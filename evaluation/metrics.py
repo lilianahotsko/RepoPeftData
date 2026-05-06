@@ -148,3 +148,123 @@ def compute_metrics(pred: str, ref: str) -> dict:
         "pred_clean": pred_clean,
         "ref_clean": ref_clean,
     }
+
+
+# ---------------------------------------------------------------------------
+# Bootstrap confidence intervals
+# ---------------------------------------------------------------------------
+
+def bootstrap_ci(
+    samples,
+    n_resamples: int = 5000,
+    ci: float = 0.95,
+    seed: int = 0,
+) -> dict:
+    """Percentile bootstrap CI for the mean of ``samples``.
+
+    Parameters
+    ----------
+    samples:
+        Iterable of per-pair scalar metric values (e.g. one EM 0/1 or one
+        EditSim 0..1 per QnA pair).
+    n_resamples:
+        Number of bootstrap resamples. 5000 is the default used everywhere in
+        the paper.
+    ci:
+        Confidence level in (0, 1). Default 0.95 -> 2.5% / 97.5% percentiles.
+    seed:
+        Resample RNG seed for reproducibility.
+
+    Returns
+    -------
+    dict with keys ``mean``, ``low``, ``high``, ``n``, ``n_resamples``,
+    ``ci``. When ``n == 0`` returns zeros and a flag.
+    """
+    import numpy as np
+
+    arr = np.asarray(list(samples), dtype=np.float64)
+    n = int(arr.size)
+    if n == 0:
+        return {
+            "mean": 0.0,
+            "low": 0.0,
+            "high": 0.0,
+            "n": 0,
+            "n_resamples": int(n_resamples),
+            "ci": float(ci),
+            "empty": True,
+        }
+    if n_resamples <= 0:
+        m = float(arr.mean())
+        return {
+            "mean": m,
+            "low": m,
+            "high": m,
+            "n": n,
+            "n_resamples": 0,
+            "ci": float(ci),
+            "empty": False,
+        }
+
+    rng = np.random.default_rng(seed)
+    # Vectorized resampling: sample indices (n_resamples, n) at once.
+    idx = rng.integers(0, n, size=(int(n_resamples), n))
+    means = arr[idx].mean(axis=1)
+    alpha = (1.0 - float(ci)) / 2.0
+    low = float(np.quantile(means, alpha))
+    high = float(np.quantile(means, 1.0 - alpha))
+    return {
+        "mean": float(arr.mean()),
+        "low": low,
+        "high": high,
+        "n": n,
+        "n_resamples": int(n_resamples),
+        "ci": float(ci),
+        "empty": False,
+    }
+
+
+def aggregate_metrics_with_ci(
+    records,
+    n_resamples: int = 5000,
+    ci: float = 0.95,
+    seed: int = 0,
+) -> dict:
+    """Aggregate per-pair metric dicts (``compute_metrics`` output) into
+    mean + bootstrap CI for each of EM, EditSim, CodeBLEU.
+
+    ``records`` may be either a sequence of dicts produced by
+    :func:`compute_metrics`, or a sequence of (em, edit, bleu) tuples.
+    """
+    em, edit, bleu = [], [], []
+    for r in records:
+        if isinstance(r, dict):
+            em.append(1.0 if r.get("exact_match") else 0.0)
+            edit.append(float(r.get("edit_similarity", 0.0)))
+            bleu.append(float(r.get("code_bleu", 0.0)))
+        else:
+            a, b, c = r
+            em.append(1.0 if a else 0.0)
+            edit.append(float(b))
+            bleu.append(float(c))
+
+    return {
+        "n": len(em),
+        "exact_match": bootstrap_ci(em, n_resamples, ci, seed),
+        "edit_similarity": bootstrap_ci(edit, n_resamples, ci, seed + 1),
+        "code_bleu": bootstrap_ci(bleu, n_resamples, ci, seed + 2),
+    }
+
+
+def format_ci(stat: dict, pct: bool = False) -> str:
+    """Pretty-print one bootstrap_ci dict as 'mean [low, high]'.
+
+    Set ``pct=True`` to multiply by 100 (for EM displayed as percent).
+    """
+    if stat.get("empty"):
+        return "n=0"
+    scale = 100.0 if pct else 1.0
+    return (
+        f"{stat['mean'] * scale:.2f} "
+        f"[{stat['low'] * scale:.2f}, {stat['high'] * scale:.2f}]"
+    )

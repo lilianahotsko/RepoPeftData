@@ -41,7 +41,7 @@ import sys
 import time
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -55,7 +55,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from code2lora_gru import Code2LoRAGRU, pool_file_chunks_maxmean
 from parquet_commit_dataset import (
+    LAZY_QNA_SPEC_KEY,
+    estimate_total_qna_rows,
     load_commit_sequences_from_parquet,
+    materialize_lazy_qna_for_repo,
     resolve_parquet_sources,
     summarize_items,
 )
@@ -553,6 +556,41 @@ def _repo_content_fingerprint(repo: Dict[str, Any]) -> str:
     return h.hexdigest()[:16]
 
 
+def _repo_commit_only_fingerprint(repo: Dict[str, Any]) -> str:
+    """Diff + SHA digest only (no QnA text).
+
+    Used with ``--defer-parquet-qna`` to validate disk cache without loading
+    QnA strings when QnA parquet mtimes are unchanged.
+    """
+    import hashlib
+
+    h = hashlib.sha256()
+    diffs = repo.get("commit_diffs") or []
+    shas = repo.get("commit_shas") or []
+    h.update(f"n_commits={len(diffs)}".encode())
+    if shas:
+        h.update(f"|sha0={shas[0]}|sha_last={shas[-1]}".encode())
+    for d in diffs[:4]:
+        h.update(b"|d|")
+        h.update((d or "").encode("utf-8", errors="replace")[:4096])
+    for d in diffs[-2:]:
+        h.update(b"|t|")
+        h.update((d or "").encode("utf-8", errors="replace")[:4096])
+    return h.hexdigest()[:16]
+
+
+def _qna_paths_mtime_tag(qna_paths: Iterable[Any]) -> int:
+    """Cheap tag from QnA parquet mtimes + sizes (for lazy cache fast-path)."""
+    tag = 0
+    for p in qna_paths:
+        pp = Path(p)
+        if pp.is_file():
+            st = pp.stat()
+            tag = tag * 31 + int(st.st_mtime_ns)
+            tag = tag * 31 + int(st.st_size)
+    return int(tag & ((1 << 63) - 1))
+
+
 def _precompute_repo_cache(
     data: List[Dict[str, Any]],
     tokenizer: AutoTokenizer,
@@ -607,12 +645,17 @@ def _precompute_repo_cache(
             repo_cache_dir = None
 
     total_commits = sum(len(r["commit_diffs"]) for r in data)
-    total_pairs = sum(
-        sum(len(v) for v in r["assertions_by_commit"].values()) for r in data
+    defer_any = any(LAZY_QNA_SPEC_KEY in r for r in data)
+    total_pairs_for_print: Any = (
+        "deferred per repo"
+        if defer_any
+        else sum(
+            sum(len(v) for v in r["assertions_by_commit"].values()) for r in data
+        )
     )
     print(
         f"{log_prefix}[CACHE] precomputing {total_commits} diff "
-        f"embeddings + {total_pairs} tokenized assertions "
+        f"embeddings + {total_pairs_for_print} tokenized assertions "
         f"(cache_dir={repo_cache_dir})..."
     )
     t0 = time.time()
@@ -622,27 +665,70 @@ def _precompute_repo_cache(
 
     for repo in data:
         repo_id = repo.get("repo_id", "")
-        content_fp = _repo_content_fingerprint(repo)
+        lazy_spec = repo.get(LAZY_QNA_SPEC_KEY)
+        qna_mtime_tag_for_save = 0
+        if lazy_spec is not None:
+            qna_mtime_tag_for_save = _qna_paths_mtime_tag(lazy_spec["qna_paths"])
+
+        commit_only_fp = _repo_commit_only_fingerprint(repo)
 
         cache_file: Optional[Path] = None
         if repo_cache_dir is not None and repo_id:
             safe_id = repo_id.replace("/", "__").replace("\\", "__")
             cache_file = repo_cache_dir / f"{safe_id}.pt"
-            if cache_file.exists():
-                try:
-                    payload = torch.load(
-                        cache_file, map_location="cpu", weights_only=False,
-                    )
-                    if payload.get("content_fp") == content_fp:
-                        repo["diff_embs"] = payload["diff_embs"]
-                        repo["tokenized_by_commit"] = payload["tokenized_by_commit"]
-                        loaded_from_disk += 1
-                        continue
-                except Exception as e:
-                    print(
-                        f"{log_prefix}[CACHE] failed to load {cache_file} "
-                        f"({e}); rebuilding"
-                    )
+
+        # Lazy QnA: reload from disk without re-reading Parquet strings when
+        # commit history and QnA file mtimes match the last cached build.
+        if (
+            lazy_spec is not None
+            and cache_file is not None
+            and cache_file.exists()
+        ):
+            try:
+                payload = torch.load(
+                    cache_file, map_location="cpu", weights_only=False,
+                )
+                if (
+                    payload.get("lazy_skip_v1")
+                    and payload.get("commit_only_fp") == commit_only_fp
+                    and int(payload.get("qna_mtime_tag", -1)) == qna_mtime_tag_for_save
+                    and payload.get("assertion_splits") is not None
+                ):
+                    repo["diff_embs"] = payload["diff_embs"]
+                    repo["tokenized_by_commit"] = payload["tokenized_by_commit"]
+                    repo["assertion_splits"] = payload["assertion_splits"]
+                    repo.pop(LAZY_QNA_SPEC_KEY, None)
+                    loaded_from_disk += 1
+                    continue
+            except Exception as e:
+                print(
+                    f"{log_prefix}[CACHE] lazy fast-path load failed for "
+                    f"{cache_file} ({e}); will materialize QnA",
+                )
+
+        if repo.get(LAZY_QNA_SPEC_KEY) is not None:
+            materialize_lazy_qna_for_repo(repo)
+
+        content_fp = _repo_content_fingerprint(repo)
+
+        if cache_file is not None and cache_file.exists():
+            try:
+                payload = torch.load(
+                    cache_file, map_location="cpu", weights_only=False,
+                )
+                if payload.get("content_fp") == content_fp:
+                    repo["diff_embs"] = payload["diff_embs"]
+                    repo["tokenized_by_commit"] = payload["tokenized_by_commit"]
+                    if payload.get("assertion_splits") is not None:
+                        repo["assertion_splits"] = payload["assertion_splits"]
+                    repo.pop("assertions_by_commit", None)
+                    loaded_from_disk += 1
+                    continue
+            except Exception as e:
+                print(
+                    f"{log_prefix}[CACHE] failed to load {cache_file} "
+                    f"({e}); rebuilding"
+                )
 
         diffs = repo["commit_diffs"]
         if diffs:
@@ -670,6 +756,7 @@ def _precompute_repo_cache(
                 })
             tokenized_by_commit[ci] = tok_list
         repo["tokenized_by_commit"] = tokenized_by_commit
+        repo.pop("assertions_by_commit", None)
         rebuilt += 1
 
         if cache_file is not None:
@@ -678,6 +765,10 @@ def _precompute_repo_cache(
                 torch.save(
                     {
                         "content_fp": content_fp,
+                        "commit_only_fp": commit_only_fp,
+                        "lazy_skip_v1": True,
+                        "qna_mtime_tag": qna_mtime_tag_for_save,
+                        "assertion_splits": repo.get("assertion_splits"),
                         "diff_embs": emb_tensor,
                         "tokenized_by_commit": tokenized_by_commit,
                     },
@@ -967,7 +1058,6 @@ def train_commit_sequential(
             repo_id = repo_item["repo_id"]
             commit_diffs = repo_item["commit_diffs"]
             commit_indices = repo_item["commit_indices"]
-            assertions_by_commit = repo_item["assertions_by_commit"]
             splits_by_commit = repo_item.get("assertion_splits")
             diff_embs = repo_item.get("diff_embs")
             tok_by_commit = repo_item.get("tokenized_by_commit")
@@ -1002,6 +1092,7 @@ def train_commit_sequential(
                         mode=args.assertion_mode,
                     )
                 else:
+                    assertions_by_commit = repo_item.get("assertions_by_commit") or {}
                     assertions = get_assertions_up_to(
                         assertions_by_commit, ci,
                         splits_by_commit=splits_by_commit,
@@ -1219,6 +1310,16 @@ def main():
     ap.add_argument("--parquet-prefer", type=str, default="auto",
                     choices=["auto", "concat", "shards", "hf"],
                     help="Which parquet layout to read from inside --parquet-dir.")
+    ap.add_argument(
+        "--defer-parquet-qna",
+        action="store_true",
+        help=(
+            "For concat/HF parquet layouts: load only commit tables at startup; "
+            "stream each repo's QnA from disk inside the embedding/tokenization "
+            "cache phase (see parquet_commit_dataset.materialize_lazy_qna_for_repo). "
+            "Much lower peak host RAM than materializing the full filtered QnA table."
+        ),
+    )
     ap.add_argument("--db-path", type=str, default=default_db,
                     help="[Legacy] Path to commits_assertions.db (SQLite).")
     ap.add_argument("--data-source", type=str, default="parquet",
@@ -1237,6 +1338,17 @@ def main():
             "chunk_tokens, overlap, embedder_max_length) so different configs "
             "don't collide. Set to empty / 'none' / 'off' to disable disk caching. "
             "Default: $COMMIT_CACHE_DIR (if set), else disabled."
+        ),
+    )
+    ap.add_argument(
+        "--precompute-cache-only",
+        action="store_true",
+        help=(
+            "Load Parquet, the frozen diff embedding model, and the LM tokenizer; "
+            "write per-repo diff embeddings + tokenized assertions under "
+            "--cache-dir; then exit without loading the base LLM or GRU or "
+            "running training. Requires a nonempty --cache-dir. Use the same "
+            "--embed-model, --model-name, --max-seq-len, and chunk flags as training."
         ),
     )
     ap.add_argument("--limit-train-repos", type=int, default=None)
@@ -1366,6 +1478,7 @@ def main():
             cross_repo_splits=["train"],
             in_repo_splits=None,  # load every assertion; filter at loss time
             limit_repos=args.limit_train_repos,
+            defer_qna_materialization=args.defer_parquet_qna,
         )
 
         if not args.no_in_repo_eval:
@@ -1392,6 +1505,7 @@ def main():
                     cross_repo_splits=[cr],
                     in_repo_splits=None,
                     limit_repos=args.limit_eval_repos,
+                    defer_qna_materialization=args.defer_parquet_qna,
                 )
                 eval_suites[f"cross_repo_{cr}"] = {
                     "data": data,
@@ -1429,23 +1543,55 @@ def main():
 
     # ── Summaries ──
     def _n_a(d: Dict) -> int:
-        return sum(len(v) for v in d["assertions_by_commit"].values())
+        return sum(len(v) for v in d.get("assertions_by_commit", {}).values())
 
     total_train_commits = sum(len(d["commit_diffs"]) for d in train_data)
-    total_train_assertions = sum(_n_a(d) for d in train_data)
-    print(
-        f"  Train:      {len(train_data)} repos, {total_train_commits} commits, "
-        f"{total_train_assertions} assertions"
-    )
+    if train_data and LAZY_QNA_SPEC_KEY in train_data[0]:
+        try:
+            n_qna_rows = estimate_total_qna_rows(
+                sources,
+                cross_repo_splits=["train"],
+                in_repo_splits=None,
+                repo_ids=[d["repo_id"] for d in train_data],
+            )
+        except Exception as exc:
+            n_qna_rows = -1
+            print(f"  (estimate_total_qna_rows failed: {exc})")
+        print(
+            f"  Train:      {len(train_data)} repos, {total_train_commits} commits, "
+            f"~{n_qna_rows if n_qna_rows >= 0 else 'n/a'} QnA parquet rows (filtered; "
+            f"--defer-parquet-qna)",
+        )
+    else:
+        total_train_assertions = sum(_n_a(d) for d in train_data)
+        print(
+            f"  Train:      {len(train_data)} repos, {total_train_commits} commits, "
+            f"{total_train_assertions} assertions",
+        )
     for name, suite in eval_suites.items():
         data = suite.get("data") or []
         if not data:
             print(f"  {name}: EMPTY (disabled)")
             continue
         nc = sum(len(d["commit_diffs"]) for d in data)
-        na = sum(_n_a(d) for d in data)
-        print(f"  {name}: {len(data)} repos, {nc} commits, {na} assertions "
-              f"(keep={suite.get('keep_splits')})")
+        if data and LAZY_QNA_SPEC_KEY in data[0]:
+            cr0 = data[0].get("cross_repo_split", "train")
+            try:
+                nrow = estimate_total_qna_rows(
+                    sources,
+                    cross_repo_splits=[cr0],
+                    in_repo_splits=None,
+                    repo_ids=[d["repo_id"] for d in data],
+                )
+            except Exception:
+                nrow = -1
+            na_s = f"~{nrow if nrow >= 0 else 'n/a'} QnA rows (deferred)"
+        else:
+            na_s = f"{sum(_n_a(d) for d in data)} assertions"
+        print(
+            f"  {name}: {len(data)} repos, {nc} commits, {na_s} "
+            f"(keep={suite.get('keep_splits')})",
+        )
 
     if not train_data:
         raise ValueError(
@@ -1459,11 +1605,14 @@ def main():
         print(f"  {k}: {v}")
     print("=" * 80, flush=True)
 
-    wandb.init(
-        project="code2lora-gru-commits",
-        name=args.output_dir.split("/")[-1],
-        config=vars(args),
-    )
+    _wb_kw: Dict[str, Any] = {
+        "project": "code2lora-gru-commits",
+        "name": args.output_dir.split("/")[-1],
+        "config": vars(args),
+    }
+    if args.precompute_cache_only:
+        _wb_kw["mode"] = "disabled"
+    wandb.init(**_wb_kw)
 
     # ── Load embedding model (frozen) ──
     print(f"Loading embedding model: {args.embed_model}...")
@@ -1492,6 +1641,50 @@ def main():
     tok = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
+
+    if args.precompute_cache_only:
+        cdir = (args.cache_dir or "").strip()
+        if not cdir or cdir.lower() in ("none", "off"):
+            raise ValueError(
+                "--precompute-cache-only requires a nonempty --cache-dir "
+                "(or COMMIT_CACHE_DIR).",
+            )
+        cache_dir_path = Path(cdir)
+        print("\n[PRECOMPUTE-CACHE-ONLY] Skipping base LLM and GRU; "
+              "writing per-repo caches...\n", flush=True)
+        _precompute_repo_cache(
+            train_data,
+            tok,
+            args.max_seq_len,
+            diff_embedder,
+            log_prefix="  train ",
+            cache_dir=cache_dir_path,
+            embedder_name=args.embed_model,
+            tokenizer_name=args.model_name,
+        )
+        seen_pre: set = set()
+        seen_pre.update(id(r) for r in train_data)
+        for name, suite in eval_suites.items():
+            data = suite.get("data") or []
+            fresh = [r for r in data if id(r) not in seen_pre]
+            if fresh:
+                _precompute_repo_cache(
+                    fresh,
+                    tok,
+                    args.max_seq_len,
+                    diff_embedder,
+                    log_prefix=f"  {name} ",
+                    cache_dir=cache_dir_path,
+                    embedder_name=args.embed_model,
+                    tokenizer_name=args.model_name,
+                )
+                seen_pre.update(id(r) for r in fresh)
+        print(
+            f"\n[PRECOMPUTE-CACHE-ONLY] Finished. Cache root: {cache_dir_path}\n",
+            flush=True,
+        )
+        wandb.finish()
+        return
 
     print(f"Loading frozen base model: {args.model_name}...")
     base_model = AutoModelForCausalLM.from_pretrained(

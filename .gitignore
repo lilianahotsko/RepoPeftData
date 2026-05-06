@@ -64,3 +64,8 @@ PAW_CODE
 *.err
 *.html
 .claude
+
+*.png
+*.svg
+*.jsonl
+*.txt

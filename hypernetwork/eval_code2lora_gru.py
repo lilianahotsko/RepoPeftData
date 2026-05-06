@@ -37,10 +37,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from evaluation.metrics import (
+    aggregate_metrics_with_ci,
     code_bleu_score,
     compute_metrics,
     edit_similarity,
     exact_match,
+    format_ci,
     postprocess_prediction,
     strip_comments,
 )
@@ -203,7 +205,13 @@ def evaluate_standard(
 ):
     """Standard evaluation: full file sequence per repo."""
     bos_id = get_bos_id(tok)
-    results = {"em_count": 0, "total": 0, "edit_sum": 0.0, "bleu_sum": 0.0}
+    results = {
+        "em_count": 0,
+        "total": 0,
+        "edit_sum": 0.0,
+        "bleu_sum": 0.0,
+        "samples": [],  # raw (em01, edit, bleu) tuples for bootstrap CIs
+    }
     per_repo_results = {}
 
     total_repos = len(repos_data)
@@ -267,6 +275,9 @@ def evaluate_standard(
             results["total"] += 1
             results["edit_sum"] += edit_sim
             results["bleu_sum"] += bleu
+            results["samples"].append(
+                (1.0 if em else 0.0, float(edit_sim), float(bleu))
+            )
 
             repo_em += int(em)
             repo_total += 1
@@ -447,6 +458,12 @@ def main():
         "up_proj", "gate_proj", "down_proj",
     ]
     ap.add_argument("--target-modules", nargs="+", default=target_modules_default)
+    ap.add_argument(
+        "--bootstrap", type=int, default=0,
+        help="Bootstrap resamples for 95%% CIs on EM/EditSim/CodeBLEU (0 = off).",
+    )
+    ap.add_argument("--seed", type=int, default=3407,
+                    help="Bootstrap RNG seed for reproducibility.")
     args = ap.parse_args()
 
     # ── Load code LLM ──
@@ -527,6 +544,18 @@ def main():
             "per_repo": per_repo,
             "config": config,
         }
+
+        if args.bootstrap > 0 and results.get("samples"):
+            ci_block = aggregate_metrics_with_ci(
+                results["samples"],
+                n_resamples=int(args.bootstrap),
+                seed=int(args.seed),
+            )
+            output_data["ci95"] = ci_block
+            print("  CI95 (bootstrap, R={:,}):".format(int(args.bootstrap)))
+            print(f"    EM%      {format_ci(ci_block['exact_match'], pct=True)}")
+            print(f"    EditSim  {format_ci(ci_block['edit_similarity'])}")
+            print(f"    CodeBLEU {format_ci(ci_block['code_bleu'])}")
 
     else:
         commit_steps = sorted(set(int(x) for x in args.commit_steps.split(",")))

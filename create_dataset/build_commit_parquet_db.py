@@ -91,6 +91,8 @@ CROSS_REPO_SPLIT_FILES = {
     "train": "train.json",
     "cr_val": "cr_val.json",
     "cr_test": "cr_test.json",
+    # Optional: out-of-distribution eval bundle (see build_ood_parquet_from_mined_jsonl.py)
+    "ood_test": "ood_test.json",
 }
 
 SHARDS_SUBDIR = "shards"
@@ -831,7 +833,7 @@ def _load_cross_repo_assignments(splits_dir: Path) -> Dict[str, str]:
     """Map repo_id -> cross_repo_split using the existing train/cr_val/cr_test
     split JSONs. Repos present in multiple files are assigned train > cr_val > cr_test.
     """
-    priority = ["train", "cr_val", "cr_test"]
+    priority = ["train", "cr_val", "cr_test", "ood_test"]
     assignment: Dict[str, str] = {}
     for split_name in priority:
         fname = CROSS_REPO_SPLIT_FILES[split_name]
