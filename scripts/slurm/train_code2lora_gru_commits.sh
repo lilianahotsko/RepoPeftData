@@ -14,7 +14,13 @@ source scripts/slurm/common.sh
 mkdir -p slurm_logs
 
 export PYTHONUNBUFFERED=1
-export COMMIT_CACHE_DIR="${COMMIT_CACHE_DIR:-$SCRATCH/REPO_DATASET/commit_cache}"
+# Use a separate cache dir for the smart-cap snapshot so its tokenization
+# cache does not collide with the full-data cache.
+if [ "${USE_SMARTCAP:-0}" = "1" ]; then
+    export COMMIT_CACHE_DIR="${COMMIT_CACHE_DIR:-$SCRATCH/REPO_DATASET/commit_cache_smartcap}"
+else
+    export COMMIT_CACHE_DIR="${COMMIT_CACHE_DIR:-$SCRATCH/REPO_DATASET/commit_cache}"
+fi
 export HF_HOME="${HF_HOME:-$SCRATCH/REPO_DATASET/.hf_cache}"
 export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-$HF_HOME/hub}"
 export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$HF_HOME/hub}"
@@ -23,6 +29,16 @@ mkdir -p "$COMMIT_CACHE_DIR" "$HF_HOME"
 
 PARQUET_DIR="${PARQUET_DIR:-$SCRATCH/REPO_DATASET/commit_parquet_hf}"
 PARQUET_PREFER="${PARQUET_PREFER:-hf}"
+# When set to 1 (default 0), train on the smart-capped snapshot built by
+# `scripts/slurm/build_smart_capped_qna.sh`. The snapshot keeps val/test
+# rows verbatim so cross-repo eval is unchanged; only in_repo='train'
+# QnAs are filtered (trivial-target drop + per-(file, function) round-robin
+# capped at max_per_commit). Set USE_SMARTCAP=1 to swap PARQUET_DIR to
+# the snapshot dir.
+USE_SMARTCAP="${USE_SMARTCAP:-0}"
+if [ "$USE_SMARTCAP" = "1" ]; then
+    PARQUET_DIR="${SMARTCAP_PARQUET_DIR:-$SCRATCH/REPO_DATASET/commit_parquet_hf_smartcap}"
+fi
 # Default suffix matches the paper-grade run: 5 epochs over the full 409 train
 # repos. Override via SUFFIX=... when launching ablations.
 SUFFIX="${SUFFIX:-h100_5ep_full}"
@@ -66,6 +82,7 @@ SPLITS_ARG="$PARQUET_DIR/splits"
 [ -d "$SPLITS_ARG" ] || SPLITS_ARG="$PARQUET_DIR"
 
 echo "===== Train: Code2LoRA-GRU (commit-level, HF parquet, H100) ====="
+echo "USE_SMARTCAP:            ${USE_SMARTCAP:-0}"
 echo "Parquet dir:             $PARQUET_DIR (prefer=$PARQUET_PREFER)"
 echo "Output dir:              $OUT_DIR"
 echo "Cache dir:               $COMMIT_CACHE_DIR"

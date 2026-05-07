@@ -215,3 +215,14 @@ sbatch scripts/slurm/phase10_analysis.sh
 6. **IR consistently better than CR.** All methods score higher on IR (in-repo) than CR (cross-repo), as expected — training data for those repos exists.
 
 7. **Mar 10 metric fix: FFT/sLoRA EditSim was drastically underreported.** Overgeneration after `### Target:\n` caused `postprocess_prediction()` to keep hundreds of extra tokens. Fixed by truncating predictions to match target format. FFT EditSim: 0.37→0.70, sLoRA: 0.27→0.64. Code2LoRA unaffected.
+
+
+
+
+- at least 1 commit between 2024-2025
+- at least one before 2024 
+- filter the ood by the end date 
+- double check if the filtering criterion is the same for the regular repos and the ood 
+- cap: all the evaluation (8 qnas per commit)
+
+- reevaluate the code2lora- nongru version (retrain the hypernet on the cutoff, and evaluate on each next diffs)

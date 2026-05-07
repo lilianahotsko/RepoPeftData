@@ -678,7 +678,7 @@ def main() -> None:
 
     # Commit-level only
     ap.add_argument("--parquet-dir", type=str, default=None)
-    ap.add_argument("--parquet-prefer", type=str, default="hf",
+    ap.add_argument("--parquet-prefer", type=str, default="auto",
                     choices=["auto", "concat", "shards", "hf"])
     ap.add_argument(
         "--cross-repo-splits", nargs="+", default=None,

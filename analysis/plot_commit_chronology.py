@@ -266,6 +266,46 @@ def load_qna_counts_per_commit(
     return counts, sorted(repos_set)
 
 
+@dataclass(frozen=True)
+class ParquetSource:
+    """One named (parquet_dir, repos_root) source."""
+    label: str
+    parquet_dir: str
+    repos_root: str
+    prefer: str = "auto"
+
+
+def load_qna_counts_multi(
+    sources: Sequence[ParquetSource],
+) -> Tuple[DefaultDict[Tuple[str, str], int], Dict[str, str], Dict[str, str]]:
+    """Union QnA counts across multiple parquet sources.
+
+    Returns:
+      counts:        merged ``(repo_id, sha) -> qna_count`` (summed if a repo
+                     appears in multiple sources, which should not happen by
+                     construction).
+      repo_to_label: ``repo_id -> source label`` (first source wins on collision).
+      repo_to_root:  ``repo_id -> repos_root`` (must match the source label).
+    """
+    counts: DefaultDict[Tuple[str, str], int] = defaultdict(int)
+    repo_to_label: Dict[str, str] = {}
+    repo_to_root: Dict[str, str] = {}
+    for src in sources:
+        sub_counts, repo_ids = load_qna_counts_per_commit(
+            parquet_dir=src.parquet_dir,
+            commits_path=None,
+            qna_path=None,
+            prefer=src.prefer,
+        )
+        for k, v in sub_counts.items():
+            counts[k] += v
+        for rid in repo_ids:
+            if rid not in repo_to_label:
+                repo_to_label[rid] = src.label
+                repo_to_root[rid] = src.repos_root
+    return counts, repo_to_label, repo_to_root
+
+
 # ---------------------------------------------------------------------------
 # Plotting
 # ---------------------------------------------------------------------------
@@ -304,6 +344,32 @@ def _scale_sizes_qna(n_qna: List[int]) -> List[float]:
     return out
 
 
+def _draw_source_dividers(
+    ax,
+    repo_ids: Sequence[str],
+    repo_to_label: Dict[str, str],
+) -> None:
+    """Draw a horizontal dashed line whenever the source label changes."""
+    if not repo_to_label:
+        return
+    last = None
+    for i, rid in enumerate(repo_ids):
+        lbl = repo_to_label.get(rid, "")
+        if last is not None and lbl != last:
+            ax.axhline(i - 0.5, color="#444444", linestyle="--", linewidth=0.6, alpha=0.6)
+        last = lbl
+
+
+_SOURCE_TINTS = {
+    "canonical": "#0b3d91",
+    "ood":       "#a23b00",
+}
+
+
+def _ytick_color_for(label: str) -> str:
+    return _SOURCE_TINTS.get(label, "#222222")
+
+
 def plot_global_timeline(
     *,
     repo_ids: List[str],
@@ -312,9 +378,11 @@ def plot_global_timeline(
     out_path: Path,
     mode: str,
     title: str,
+    repo_to_label: Optional[Dict[str, str]] = None,
 ) -> None:
     """mode: 'churn' | 'qna'."""
     repo_ids = list(repo_ids)
+    repo_to_label = repo_to_label or {}
     y_map = {rid: i for i, rid in enumerate(repo_ids)}
     xs: List[datetime] = []
     ys: List[float] = []
@@ -334,7 +402,7 @@ def plot_global_timeline(
         print("  (skip global plot: no commit points)", flush=True)
         return
 
-    fig_h = max(6.0, min(120.0, 0.11 * len(repo_ids) + 4.0))
+    fig_h = max(6.0, min(140.0, 0.11 * len(repo_ids) + 4.0))
     fig, ax = plt.subplots(figsize=(14, fig_h), dpi=150)
 
     if mode == "churn":
@@ -345,8 +413,14 @@ def plot_global_timeline(
         c_arr = ["#d62728" if int(n) > 0 else "#1f77b4" for n in qnas]
         ax.scatter(xs, ys, s=s, c=c_arr, alpha=0.65, linewidths=0, edgecolors="none")
 
+    _draw_source_dividers(ax, repo_ids, repo_to_label)
+
     ax.set_yticks(range(len(repo_ids)))
-    ax.set_yticklabels(repo_ids, fontsize=max(4, min(9, 900 // max(len(repo_ids), 1))))
+    label_fontsize = max(4, min(9, 900 // max(len(repo_ids), 1)))
+    ax.set_yticklabels(repo_ids, fontsize=label_fontsize)
+    if repo_to_label:
+        for tick, rid in zip(ax.get_yticklabels(), repo_ids):
+            tick.set_color(_ytick_color_for(repo_to_label.get(rid, "")))
     ax.set_xlabel("Time (commit date, author ISO)")
     ax.set_ylabel("Repository")
     ax.set_title(title)
@@ -365,9 +439,11 @@ def plot_global_timeline_qna_with_stats(
     qna_counts: DefaultDict[Tuple[str, str], int],
     out_path: Path,
     title: str,
+    repo_to_label: Optional[Dict[str, str]] = None,
 ) -> None:
     """QnA timeline with per-repo stats aligned as right-side columns."""
     repo_ids = list(repo_ids)
+    repo_to_label = repo_to_label or {}
     y_map = {rid: i for i, rid in enumerate(repo_ids)}
     xs: List[datetime] = []
     ys: List[float] = []
@@ -399,7 +475,7 @@ def plot_global_timeline_qna_with_stats(
         print("  (skip QnA stats SVG: no commit points)", flush=True)
         return
 
-    fig_h = max(6.0, min(120.0, 0.11 * len(repo_ids) + 4.0))
+    fig_h = max(6.0, min(140.0, 0.11 * len(repo_ids) + 4.0))
     fig = plt.figure(figsize=(24, fig_h), dpi=150)
     gs = fig.add_gridspec(1, 2, width_ratios=[14.5, 6.3], wspace=0.03)
     ax = fig.add_subplot(gs[0, 0])
@@ -409,8 +485,14 @@ def plot_global_timeline_qna_with_stats(
     c_arr = ["#d62728" if int(n) > 0 else "#1f77b4" for n in qnas]
     ax.scatter(xs, ys, s=s, c=c_arr, alpha=0.65, linewidths=0, edgecolors="none")
 
+    _draw_source_dividers(ax, repo_ids, repo_to_label)
+
     ax.set_yticks(range(len(repo_ids)))
-    ax.set_yticklabels(repo_ids, fontsize=max(4, min(9, 900 // max(len(repo_ids), 1))))
+    label_fontsize = max(4, min(9, 900 // max(len(repo_ids), 1)))
+    ax.set_yticklabels(repo_ids, fontsize=label_fontsize)
+    if repo_to_label:
+        for tick, rid in zip(ax.get_yticklabels(), repo_ids):
+            tick.set_color(_ytick_color_for(repo_to_label.get(rid, "")))
     ax.set_xlabel("Time (commit date, author ISO)")
     ax.set_ylabel("Repository")
     ax.set_title(title)
@@ -498,17 +580,66 @@ def plot_repo_histogram(
     plt.close(fig)
 
 
+SORT_CHOICES = ("name", "first_commit", "n_commits", "n_qnas", "source_then_name")
+
+
+def _sort_repo_ids(
+    repo_ids: List[str],
+    series_per_repo: List[List[Dict[str, Any]]],
+    qna_counts: DefaultDict[Tuple[str, str], int],
+    repo_to_label: Dict[str, str],
+    sort: str,
+) -> Tuple[List[str], List[List[Dict[str, Any]]]]:
+    """Return (sorted repo_ids, sorted series in same order)."""
+    pairs = list(zip(repo_ids, series_per_repo))
+
+    def first_commit_dt(item: Tuple[str, List[Dict[str, Any]]]):
+        commits = item[1]
+        return commits[0]["datetime"] if commits else datetime.max.replace(tzinfo=timezone.utc)
+
+    def total_qnas(item: Tuple[str, List[Dict[str, Any]]]) -> int:
+        rid, commits = item
+        return sum(int(qna_counts.get((rid, c["sha"]), 0)) for c in commits)
+
+    if sort == "name":
+        pairs.sort(key=lambda it: it[0].lower())
+    elif sort == "first_commit":
+        pairs.sort(key=first_commit_dt)
+    elif sort == "n_commits":
+        pairs.sort(key=lambda it: -len(it[1]))
+    elif sort == "n_qnas":
+        pairs.sort(key=lambda it: -total_qnas(it))
+    elif sort == "source_then_name":
+        pairs.sort(key=lambda it: (repo_to_label.get(it[0], ""), it[0].lower()))
+    else:
+        raise SystemExit(f"unknown --sort: {sort}")
+
+    sorted_ids = [it[0] for it in pairs]
+    sorted_series = [it[1] for it in pairs]
+    return sorted_ids, sorted_series
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     default_parquet = Path(
         os.environ.get("SCRATCH", str(Path.home() / "scratch"))
     ).expanduser() / "REPO_DATASET" / "commit_parquet"
-    ap.add_argument("--parquet-dir", type=str, default=str(default_parquet))
+    ap.add_argument(
+        "--parquet-dir",
+        type=str,
+        default=str(default_parquet),
+        help=(
+            "Primary parquet dir (canonical scrape). Use --extra-parquet-dir / "
+            "--extra-repos-root / --extra-source-label to add additional sources "
+            "such as the OOD parquet."
+        ),
+    )
     ap.add_argument(
         "--commits-file",
         type=str,
         default=None,
-        help="Explicit commits.parquet (use with --qna-file; overrides --parquet-dir)",
+        help="Explicit commits.parquet (use with --qna-file; overrides --parquet-dir; "
+             "ignored when --extra-parquet-dir is given).",
     )
     ap.add_argument("--qna-file", type=str, default=None)
     ap.add_argument(
@@ -521,7 +652,46 @@ def main() -> None:
         "--repos-root",
         type=str,
         required=True,
-        help="Root of cloned repos (author/repo subdirs or flat)",
+        help="Root of cloned repos for the primary parquet (author/repo subdirs or flat)",
+    )
+    ap.add_argument(
+        "--source-label",
+        type=str,
+        default="canonical",
+        help="Label for the primary parquet source (default 'canonical').",
+    )
+    ap.add_argument(
+        "--extra-parquet-dir",
+        action="append",
+        default=[],
+        help="Additional parquet dir to union (repeatable). Pair with --extra-repos-root and --extra-source-label.",
+    )
+    ap.add_argument(
+        "--extra-repos-root",
+        action="append",
+        default=[],
+        help="Repos root for the corresponding --extra-parquet-dir (repeatable, parallel).",
+    )
+    ap.add_argument(
+        "--extra-source-label",
+        action="append",
+        default=[],
+        help="Source label for the corresponding --extra-parquet-dir (repeatable, parallel).",
+    )
+    ap.add_argument(
+        "--extra-prefer",
+        action="append",
+        default=[],
+        help="Optional 'auto|concat|shards|hf' per --extra-parquet-dir (default 'auto').",
+    )
+    ap.add_argument(
+        "--sort",
+        choices=SORT_CHOICES,
+        default="source_then_name",
+        help=(
+            "How to sort repos along the y-axis. Default 'source_then_name' "
+            "groups OOD vs canonical visually with a dashed divider."
+        ),
     )
     ap.add_argument(
         "--out-dir",
@@ -545,16 +715,56 @@ def main() -> None:
     if bool(args.commits_file) ^ bool(args.qna_file):
         raise SystemExit("Provide both --commits-file and --qna-file, or neither.")
 
-    repos_root = Path(args.repos_root).expanduser().resolve()
+    if not (len(args.extra_parquet_dir) == len(args.extra_repos_root) == len(args.extra_source_label)):
+        raise SystemExit(
+            "--extra-parquet-dir, --extra-repos-root and --extra-source-label "
+            "must each be repeated the same number of times."
+        )
+    if args.extra_prefer and len(args.extra_prefer) != len(args.extra_parquet_dir):
+        raise SystemExit("--extra-prefer must be repeated as many times as --extra-parquet-dir, or omitted.")
+
     out_dir = Path(args.out_dir).expanduser().resolve()
     hist_dir = out_dir / "histograms_per_repo"
 
-    qna_counts, repo_ids_parquet = load_qna_counts_per_commit(
-        parquet_dir=None if args.commits_file else args.parquet_dir,
-        commits_path=args.commits_file,
-        qna_path=args.qna_file,
-        prefer=args.prefer,
-    )
+    sources: List[ParquetSource] = []
+    if args.commits_file and not args.extra_parquet_dir:
+        # Backward-compat: explicit commits/qna file pair, single source.
+        single_counts, single_repos = load_qna_counts_per_commit(
+            parquet_dir=None,
+            commits_path=args.commits_file,
+            qna_path=args.qna_file,
+            prefer=args.prefer,
+        )
+        repo_ids_parquet = list(single_repos)
+        qna_counts = single_counts
+        repo_to_label = {rid: args.source_label for rid in repo_ids_parquet}
+        repo_to_root = {rid: args.repos_root for rid in repo_ids_parquet}
+    else:
+        sources.append(
+            ParquetSource(
+                label=args.source_label,
+                parquet_dir=args.parquet_dir,
+                repos_root=args.repos_root,
+                prefer=args.prefer,
+            )
+        )
+        for i, (pd, rr, lbl) in enumerate(
+            zip(args.extra_parquet_dir, args.extra_repos_root, args.extra_source_label)
+        ):
+            sources.append(
+                ParquetSource(
+                    label=lbl,
+                    parquet_dir=pd,
+                    repos_root=rr,
+                    prefer=args.extra_prefer[i] if args.extra_prefer else "auto",
+                )
+            )
+        qna_counts, repo_to_label, repo_to_root = load_qna_counts_multi(sources)
+        repo_ids_parquet = sorted(repo_to_label.keys())
+        for src in sources:
+            n = sum(1 for v in repo_to_label.values() if v == src.label)
+            print(f"  source[{src.label!r}] = {n} repos  ({src.parquet_dir})", flush=True)
+
     if not repo_ids_parquet:
         raise SystemExit("No repo_id rows found in qna parquet — check paths.")
 
@@ -566,7 +776,8 @@ def main() -> None:
     series_per_repo: List[List[Dict[str, Any]]] = []
     skipped = 0
     for rid in repo_ids:
-        rdir = repo_dir_for(repos_root, rid)
+        rroot = Path(repo_to_root.get(rid, args.repos_root)).expanduser().resolve()
+        rdir = repo_dir_for(rroot, rid)
         hist = git_log_chronological_with_churn(
             rdir, first_parent=first_parent, timeout=args.git_timeout
         )
@@ -577,7 +788,19 @@ def main() -> None:
         series_per_repo.append(hist)
 
     if skipped:
-        print(f"  warning: {skipped} repos had empty/missing git history under {repos_root}", flush=True)
+        print(f"  warning: {skipped} repos had empty/missing git history under their respective repos roots", flush=True)
+
+    repo_ids, series_per_repo = _sort_repo_ids(
+        repo_ids, series_per_repo, qna_counts, repo_to_label, args.sort,
+    )
+    print(f"  sort={args.sort!r}; total {len(repo_ids)} repos to plot", flush=True)
+
+    title_suffix = ""
+    if args.extra_parquet_dir:
+        groups = {}
+        for rid in repo_ids:
+            groups[repo_to_label.get(rid, "")] = groups.get(repo_to_label.get(rid, ""), 0) + 1
+        title_suffix = " (" + " + ".join(f"{n} {lbl}" for lbl, n in groups.items()) + ")"
 
     plot_global_timeline(
         repo_ids=repo_ids,
@@ -585,7 +808,8 @@ def main() -> None:
         qna_counts=qna_counts,
         out_path=out_dir / "commits_timeline_churn.png",
         mode="churn",
-        title="All commits (first-parent): dot area ∝ lines added+deleted (numstat)",
+        title=f"All commits (first-parent): dot area ∝ lines added+deleted (numstat){title_suffix}",
+        repo_to_label=repo_to_label,
     )
     plot_global_timeline(
         repo_ids=repo_ids,
@@ -593,14 +817,16 @@ def main() -> None:
         qna_counts=qna_counts,
         out_path=out_dir / "commits_timeline_qna.png",
         mode="qna",
-        title="Commits: blue = no new QnA rows; red area ∝ new QnA pairs (parquet)",
+        title=f"Commits: blue = no new QnA rows; red area ∝ new QnA pairs (parquet){title_suffix}",
+        repo_to_label=repo_to_label,
     )
     plot_global_timeline_qna_with_stats(
         repo_ids=repo_ids,
         series_per_repo=series_per_repo,
         qna_counts=qna_counts,
         out_path=out_dir / "commits_timeline_qna_with_stats.svg",
-        title="Commits and QnA creation by repository: red area ∝ new QnA pairs",
+        title=f"Commits and QnA creation by repository: red area ∝ new QnA pairs{title_suffix}",
+        repo_to_label=repo_to_label,
     )
 
     if not args.skip_histograms:
