@@ -560,3 +560,118 @@ Aq3 : also using file qna split
 
 - collect extra repos with start data from the 2025+ (and are not the fork of any other repos that are already in the training set) - out-of-distribution set 
 
+
+# Camera-Ready Submission Notes (May 2026)
+
+The paper in `RepoPeft_Paper/main.pdf` has been rebuilt for camera-ready
+submission with the latest experimental results (24 pages, ARR template,
+final mode --- the `[review]` flag has been removed in `main.tex`).
+
+## What changed for camera-ready
+
+- **Title** updated in `RepoPeft_Paper/macros.tex`:
+  *"Code2LoRA: Hypernetworks for Repository-Conditioned and
+  Commit-Streaming Adapters of Code Language Models"*.
+- **Abstract & introduction** rewritten to centre the story on
+  (i) hypernetwork-distilled repo-specific adapters (`Code2LoRA`,
+  static `Code2LoRA-GRU_file`) and
+  (ii) commit-streaming adaptation (`Code2LoRA-GRU_commit`) with
+  $O(1)$ per-commit updates --- mapped onto deployment regimes
+  (batch / IDE-CI / federated).
+- **Table 1 (`tab:main_results`)**: the `Code2LoRA-GRU_commit` row now
+  carries real numbers from the full-scale (smart-capped, 400 train
+  repos / 5 epochs / `MAX_SEQ_LEN=4096`) checkpoint at
+  `$CKPT_DIR/CODE2LORA_GRU/commit_level_h100_5ep_smartcap_pf4_pc8/.../code2lora_gru_best.pt`:
+  CR-test 58.9% EM `[57.7, 60.1]`, IR-test 60.0% EM `[58.7, 61.3]`.
+  All other rows are unchanged from the May 6 numbers in
+  `AGENT_HANDOFF.md`.
+- **Table 6 (`tab:ood_results`)** is now headlined by
+  `Code2LoRA-GRU_commit` at **78.9% EM** on the 92-repo OOD bench
+  (180,792 deduplicated assertions; 95% bootstrap CI
+  `[78.74, 79.12]`). FFT and sLoRA OOD numbers are kept with the
+  prefix-shape caveat called out in `sec:ood_caveats`. Pretrained on
+  identical OOD inputs is 45.6% --- a clean +33.3-point delta for the
+  streaming variant.
+- **Conclusion** explicitly mentions the post-cutoff OOD gain so that
+  reviewers can see the headline number without flipping pages.
+- All `TBD` placeholders in the body and tables have been replaced.
+  `% TODO [CAMERA-READY]` markers in `text/new.tex` are kept as
+  comments only (they do not render in the PDF) and are listed below
+  as the open follow-up work.
+
+## Pending review comments / follow-ups
+
+These are notes to consider in a later revision (out of scope for the
+camera-ready unless the AC explicitly requests them):
+
+1. **Static-vs-streaming framing.** The headline numbers tell two
+   stories: GRU\textsubscript{file} wins CR/IR (64.4 / 66.4),
+   GRU\textsubscript{commit} wins OOD (78.9). The current paper
+   credits this to (a) prefix-shape (commit-derived OOD is the native
+   prefix distribution for the streaming encoder) and (b) the
+   architectural property of $O(1)$ per-commit updates. A reviewer may
+   reasonably ask for a controlled experiment that disentangles
+   prefix shape from generalization (e.g., rebuild the OOD bank with
+   short cr_test-style prefixes and re-score every method). This is
+   item 4 in `AGENT_HANDOFF.md` (open issue) and is the highest-impact
+   follow-up.
+2. **Apples-to-apples repo coverage in Table 1.** GRU\textsubscript{commit}
+   is scored on 51/52 cr_test repos and 400/409 ir_test repos because a
+   handful of repos are missing from `commit_parquet_hf` (see
+   `scripts/slurm/missing_parquet_v2_repos.txt`). Other rows score the
+   full set. Adding a `--restrict-to-method-supported-repos` flag in
+   `evaluation/run_repopeft_bench.py` and re-scoring every row on the
+   intersection would close this gap (`AGENT_HANDOFF.md` item 2).
+3. **OOD coverage for context-based methods.** RAG / ICL / DRC /
+   `Code2LoRA-direct` / GRU\textsubscript{file} / T2L-code need
+   per-OOD-repo embeddings, chunk caches, or oracle-context caches
+   before they can be scored on `ood_test.json`. The unified driver
+   already supports these once the caches exist; this is a one-pass
+   preprocessing job (`embed_repos/4_construct_embeddings.py` over
+   `$SCRATCH/REPO_DATASET/repositories_ood/`). We deliberately omit
+   these rows in Table 6 rather than fill them with mismatched
+   numbers (`AGENT_HANDOFF.md` item 3).
+4. **OOM in the IR-test pass for GRU\textsubscript{commit}.** The
+   unified driver currently materializes all train-split repos
+   upfront; switch to per-repo streaming before any large rerun
+   (`evaluation/run_repopeft_bench.py:533`,
+   `AGENT_HANDOFF.md` item 1).
+5. **`cr_val` disclosure.** A 49-repo `cr_val` parquet split exists
+   but is not yet documented in §4 of the paper
+   (`AGENT_HANDOFF.md` item 5). One-paragraph addition.
+6. **Architecture figure for GRU.** The TikZ figure in §3 currently
+   only depicts the direct-projection variant. Adding a sibling
+   figure (Mamba2 preamble → GRU sequential processing → PAW
+   shared-basis generator → per-layer LoRA) would strengthen §3.
+   Comment marker is at `text/new.tex:354`.
+7. **Ablations.** LoRA rank, hidden dim, embedding components, GRU
+   init type, BPTT window, file-ordering, PAW basis count, and base
+   model scaling (0.5B / 1.5B / 3B) are all listed at
+   `text/new.tex:1321`. None are blocking for the current claims, but
+   the rebuttal will be easier with at least a basis-count and
+   BPTT-window sweep.
+8. **Random seeds and variance.** Currently we report bootstrap CIs
+   on EM/EditSim/CodeBLEU but not seed variance. A
+   3-seed re-run for the headline CR row would close
+   `text/new.tex:1425`.
+9. **Per-repo top/bottom-10 table.** Comment marker at
+   `text/new.tex:1534`. Would be added to the appendix.
+10. **Execution-based eval beyond the pilot.** `evaluation/exec_pilot.py`
+    runs pytest on a hand-picked slice. Scaling this to all 512 repos
+    would let us replace EM with a functional metric, but is gated on
+    each repo's pytest config (some need network, fixtures, or
+    proprietary services).
+11. **NSERC funding number.** Acknowledgments line in `text/new.tex`
+    has a `% TODO`; fill in once funding paperwork is final.
+
+## How to rebuild the PDF
+
+```
+cd RepoPeft_Paper
+latexmk -pdf -interaction=nonstopmode main.tex
+```
+
+Output: `RepoPeft_Paper/main.pdf` (24 pages, ${\sim}680\,$KB). The
+build is reproducible from the texlive shipped with Compute Canada's
+StdEnv/2023; only `pdflatex` and `bibtex` are required, no shell-escape
+or external Python.

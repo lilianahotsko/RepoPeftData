@@ -584,6 +584,12 @@ def main() -> None:
         elif suite == "cross_repo_cr_test":
             cross = ["cr_test"]
             keep = None
+        elif suite == "cross_repo_ood_test":
+            # Per-commit OOD eval using the same protocol as training
+            # (h_k per commit, not h_T). Requires the OOD parquet to have
+            # cross_repo_split == 'ood_test' rows.
+            cross = ["ood_test"]
+            keep = None
         else:
             print(f"  [warn] unknown suite {suite}, skipping")
             continue
