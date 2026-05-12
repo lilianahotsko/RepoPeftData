@@ -416,6 +416,16 @@ def main() -> None:
             if i % 100 == 0 or i == len(rows):
                 print(f"  [{suite}] [{i}/{len(rows)}] kept={agg['kept']} "
                       f"qna={agg['selected_total']:,}", flush=True)
+                # Checkpoint write every 500 entries so a timeout doesn't lose
+                # hours of work. Cheaper than writing every 100.
+                if i % 500 == 0:
+                    if args.shard_total == 1:
+                        fname_part = f"{suite}.partial.json"
+                    else:
+                        fname_part = f"{suite}.shard{args.shard_index}.partial.json"
+                    (out_dir / fname_part).write_text(
+                        json.dumps({"repositories": repositories}),
+                        encoding="utf-8")
 
         # Write.
         if args.shard_total == 1:
@@ -425,6 +435,10 @@ def main() -> None:
         out_path = out_dir / fname
         out_path.write_text(json.dumps({"repositories": repositories}),
                             encoding="utf-8")
+        # Clean up the partial file once final is written.
+        partial = out_dir / fname.replace(".json", ".partial.json")
+        if partial.exists():
+            partial.unlink()
         summary[suite] = {
             "n_rows_in": len(rows),
             "n_entries_out": len(repositories),

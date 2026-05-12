@@ -739,6 +739,18 @@ def main() -> None:
 
         results[suite] = suite_out
 
+        # Write intermediate JSON after each completed suite so a timeout
+        # doesn't lose hours of work.
+        if args.output_json:
+            out = Path(args.output_json)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_text(json.dumps(results, indent=2), encoding="utf-8")
+            # Also write a per-suite file as an extra safety net.
+            per_suite_out = out.with_name(out.stem + f"__{suite}" + out.suffix)
+            per_suite_out.write_text(json.dumps({suite: suite_out}, indent=2),
+                                     encoding="utf-8")
+            print(f"  -> wrote partial results for {suite}", flush=True)
+
     if args.output_json:
         out = Path(args.output_json)
         out.parent.mkdir(parents=True, exist_ok=True)

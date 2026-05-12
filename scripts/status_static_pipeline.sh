@@ -4,17 +4,17 @@ set -uo pipefail
 : "${CKPT_DIR:=/scratch/lhotsko/TRAINING_CHECKPOINTS}"
 
 JOBS=(
-  "13688463:GRU per-commit eval (in_repo/cr suites)"
-  "13699664:Static embed shard 0 (extras)"
-  "13699665:Static embed shard 1 (extras)"
-  "13699666:Static embed shard 2 (extras)"
-  "13699667:Static embed shard 3 (extras)"
-  "13747157:Splits build (ir_test)"
-  "13747158:Splits build (ood_test)"
-  "13747159:Splits build (ir_val)"
-  "13747160:Splits build (cr_val)"
-  "13747161:Train Code2LoRA-direct"
-  "13747162:Static per-commit eval"
+  "13805695:GRU per-commit eval v2 (incremental writes)"
+  "13805696:Static embed (re-fill ir_val)"
+  "13805698:Splits ir_test shard 0/2"
+  "13805700:Splits ir_test shard 1/2"
+  "13805701:Splits cr_val shard 0/2"
+  "13805703:Splits cr_val shard 1/2"
+  "13805704:Splits ir_val (after embed)"
+  "13805970:Merge sharded splits"
+  "13805972:Train Code2LoRA-direct"
+  "13805974:Static per-commit eval"
+  "13747158:Splits build (ood_test)  [done earlier]"
 )
 
 echo "=== SLURM job statuses ==="
