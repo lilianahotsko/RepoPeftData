@@ -347,7 +347,13 @@ def main() -> None:
                     default="/scratch/lhotsko/REPO_DATASET/commit_parquet_hf_v2")
     ap.add_argument("--qnas-dir",
                     default="/scratch/lhotsko/REPO_DATASET/commit_parquet_hf_smartcap",
-                    help="Where qna/{train,ir_val,...}.parquet live.")
+                    help="Where qna/train.parquet (smart-cap) lives for training.")
+    ap.add_argument("--eval-qnas-dir",
+                    default="/scratch/lhotsko/REPO_DATASET/code2lora_snapshots_hf",
+                    help="Where qna/{ir_val,ir_test,cr_val,cr_test}.parquet "
+                         "live for the eval suites. Defaults to the v2 "
+                         "snapshots dataset which has the same canonical "
+                         "QnAs as the static Code2LoRA / baseline pipelines.")
     ap.add_argument("--output-dir", required=True)
     ap.add_argument("--model-name", default=DEFAULT_MODEL)
     ap.add_argument("--target-modules", nargs="+", default=DEFAULT_TARGET_MODULES)
@@ -359,7 +365,7 @@ def main() -> None:
     ap.add_argument("--gru-hidden-dim", type=int, default=2048)
 
     # optim
-    ap.add_argument("--epochs", type=int, default=2)
+    ap.add_argument("--epochs", type=int, default=3)
     ap.add_argument("--lr", type=float, default=5e-5)
     ap.add_argument("--weight-decay", type=float, default=0.01)
     ap.add_argument("--warmup-ratio", type=float, default=0.03)
@@ -391,6 +397,7 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     commits_dir = Path(args.commits_dir)
     qnas_dir = Path(args.qnas_dir)
+    eval_qnas_dir = Path(args.eval_qnas_dir)
 
     device = torch.device(args.device if (args.device != "cuda" or torch.cuda.is_available()) else "cpu")
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
@@ -475,7 +482,7 @@ def main() -> None:
             else (["val"] if suite == "ir_val" else ["test"])
         )
         qna_rows = load_qna_rows(
-            qnas_dir / "qna" / f"{suite}.parquet",
+            eval_qnas_dir / "qna" / f"{suite}.parquet",
         )
         qnas_by_key = _group_qnas_by_key(qna_rows)
         eval_suites[suite] = {
@@ -525,6 +532,16 @@ def main() -> None:
                 )
                 best_eval = min(best_eval, metrics_log[-1]["eval_loss"])
 
+        # End of epoch: ALWAYS save the checkpoint FIRST, then validate.
+        # This guarantees the epoch's weights are persisted even if eval
+        # later runs out of time, fails, or the job is killed.
+        type_dims = head.type_dims
+        ep_path = _save_ckpt(out_dir, gru, head, type_dims, args,
+                             name=f"ep{epoch}")
+        latest_path = _save_ckpt(out_dir, gru, head, type_dims, args,
+                                 name="latest")
+        print(f"  [ckpt] end-of-epoch ep{epoch} -> {ep_path} "
+              f"(also updated {latest_path})", flush=True)
         _do_eval(
             args, base_model, gru, head, specs, tokenizer, eval_suites, device,
             out_dir, metrics_log, best_eval_ref=[best_eval],

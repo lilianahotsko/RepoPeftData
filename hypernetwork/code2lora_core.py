@@ -53,9 +53,17 @@ import torch.nn.functional as F
 class LoRA(nn.Module):
     """Wraps an ``nn.Linear`` with an additive low-rank update.
 
-    Forward: ``y = base(x) + scaling * (x @ A^T) @ B^T``,
-    where the per-batch A: [rank, in_f] and B: [out_f, rank] are set by an
+    Forward: ``y = base(x) + scaling * (x @ A^T) @ B^T``, where the per-batch
+    A: ``[rank, in_features]`` and B: ``[out_features, rank]`` come from an
     external hypernet via :meth:`set_lora_weights`.
+
+    IMPORTANT autograd contract (matches ``hypernetwork_sampled.py:LoRA``):
+    A and B are kept as **plain attributes**, not buffers, and are stored
+    **without detaching**, so the LM loss's backward graph flows through
+    them straight into the hypernet parameters that produced them. The
+    base ``nn.Linear`` is frozen and its forward sees a detached copy of
+    the input to avoid building an autograd graph through the LLM weights
+    (saves a lot of memory).
     """
 
     def __init__(self, base: nn.Linear, in_features: int, out_features: int,
@@ -67,28 +75,31 @@ class LoRA(nn.Module):
         self.in_features = in_features
         self.out_features = out_features
         self.rank = rank
-        self.scaling = alpha / rank
-        # Buffers (not parameters) because the values come from the hypernet.
-        self.register_buffer("A", torch.zeros(rank, in_features), persistent=False)
-        self.register_buffer("B", torch.zeros(out_features, rank), persistent=False)
-        self._has_lora_weights = False
+        self.scaling = float(alpha) / float(max(1, rank))
+        # Plain attributes -- NOT registered buffers -- so assignment preserves
+        # grad_fn for tensors coming from the hypernet.
+        self.A: Optional[torch.Tensor] = None  # [rank, in_features]
+        self.B: Optional[torch.Tensor] = None  # [out_features, rank]
 
     def set_lora_weights(self, A: torch.Tensor, B: torch.Tensor) -> None:
-        # Always live on the same device/dtype as the base weight.
-        device = self.base.weight.device
-        dtype = self.base.weight.dtype
-        self.A = A.detach().to(device=device, dtype=dtype)
-        self.B = B.detach().to(device=device, dtype=dtype)
-        self._has_lora_weights = True
+        # No .detach() -- we WANT gradients to flow back to the hypernet.
+        # No device cast either (head outputs land on the same device);
+        # leave dtype as-is and let the forward path upcast to fp32 if
+        # the base is bf16.
+        self.A = A
+        self.B = B
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        out = self.base(x)
-        if not self._has_lora_weights:
-            return out
-        # x: [..., in_f]; A: [rank, in_f] -> low_rank: [..., rank]
-        low = F.linear(x, self.A)
-        delta = F.linear(low, self.B) * self.scaling
-        return out + delta
+        y = self.base(x)
+        if self.A is None or self.B is None:
+            return y
+        # Compute the LoRA delta in fp32 for numerical headroom; detach x
+        # so we don't build an autograd graph through the (frozen) base.
+        x_f32 = x.detach().to(torch.float32)
+        A = self.A.to(torch.float32)
+        B = self.B.to(torch.float32)
+        delta = F.linear(F.linear(x_f32, A), B) * self.scaling
+        return y + delta.to(dtype=y.dtype)
 
 
 @dataclass

@@ -452,7 +452,14 @@ def main() -> None:
                          global_step=global_step, epoch=epoch)
                 best_eval = min(best_eval, metrics_log[-1].get("eval_loss", float("inf")))
 
-        # End of epoch: always eval + save.
+        # End of epoch: ALWAYS save the checkpoint FIRST, then validate. The
+        # epoch's weights are persisted even if eval later runs out of time
+        # or the SLURM job is killed.
+        type_dims = head.type_dims
+        ep_path = _save_ckpt(out_dir, head, type_dims, args, name=f"ep{epoch}")
+        latest_path = _save_ckpt(out_dir, head, type_dims, args, name="latest")
+        print(f"  [ckpt] end-of-epoch ep{epoch} -> {ep_path} "
+              f"(also updated {latest_path})", flush=True)
         _do_eval(args, base_model, head, specs, tokenizer, eval_suites,
                  device, out_dir, metrics_log, best_eval_ref=[best_eval],
                  global_step=global_step, epoch=epoch, end_of_epoch=True)

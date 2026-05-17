@@ -71,7 +71,7 @@ from evaluation.metrics import (  # noqa: E402
 
 
 DEFAULT_BASE_MODEL = "Qwen/Qwen2.5-Coder-1.5B"
-DEFAULT_QNA_DIR = "/scratch/lhotsko/REPO_DATASET/commit_parquet_hf_v2/qna"
+DEFAULT_QNA_DIR = "/scratch/lhotsko/REPO_DATASET/code2lora_snapshots_hf/qna"
 
 
 # ---------------------------------------------------------------------------
@@ -311,15 +311,16 @@ def _summarize(samples: List[Tuple[float, float, float]],
         {"exact_match": bool(em), "edit_similarity": ed, "code_bleu": cb}
         for (em, ed, cb) in samples
     ]
-    agg = aggregate_metrics_with_ci(metric_dicts, n_bootstrap=int(bootstrap))
+    agg = aggregate_metrics_with_ci(metric_dicts, n_resamples=int(bootstrap))
     out: Dict[str, Any] = {}
     for k, v in agg.items():
         if isinstance(v, dict) and "mean" in v:
+            # ``v`` is the per-metric dict returned by bootstrap_ci:
+            # {mean, low, high, n, n_resamples, ci (=conf level, not bounds)}.
             out[k] = float(v["mean"])
-            ci = v.get("ci")
-            if ci is not None:
-                out[f"{k}_ci"] = [float(ci.get("low", 0.0)),
-                                  float(ci.get("high", 0.0))]
+            out[f"{k}_ci"] = [float(v.get("low", 0.0)),
+                              float(v.get("high", 0.0))]
+            out[f"{k}_n"] = int(v.get("n", 0))
         else:
             out[k] = v
     return out
@@ -374,11 +375,14 @@ def main() -> None:
                     help="Left-truncate prefix to keep last N tokens; matches "
                          "v2 Code2LoRA trainers' --max-seq-len (minus target budget).")
     ap.add_argument("--max-new-tokens", type=int, default=64)
-    ap.add_argument("--batch-size", type=int, default=4)
+    ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--repo-limit", type=int, default=0,
                     help="Limit number of repos per suite (debug; 0 = all).")
-    ap.add_argument("--qnas-per-commit-limit", type=int, default=0,
-                    help="Cap QnAs per (repo, commit). 0 = no cap.")
+    ap.add_argument("--qnas-per-commit-limit", type=int, default=8,
+                    help="Cap QnAs per (repo, commit). Matches the GRU "
+                         "trainer's --max-qna-per-commit eval cap so all "
+                         "models score the same number of triples per "
+                         "commit. 0 = no cap.")
     ap.add_argument("--bootstrap", type=int, default=5000)
     ap.add_argument("--device", default="cuda")
     args = ap.parse_args()

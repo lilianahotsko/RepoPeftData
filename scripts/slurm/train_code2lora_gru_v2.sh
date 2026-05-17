@@ -33,11 +33,12 @@ export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:T
 
 COMMITS_DIR="${COMMITS_DIR:-$SCRATCH/REPO_DATASET/commit_parquet_hf_v2}"
 QNAS_DIR="${QNAS_DIR:-$SCRATCH/REPO_DATASET/commit_parquet_hf_smartcap}"
-SUFFIX="${SUFFIX:-h100_v2_gru}"
+EVAL_QNAS_DIR="${EVAL_QNAS_DIR:-$SCRATCH/REPO_DATASET/code2lora_snapshots_hf}"
+SUFFIX="${SUFFIX:-h100_v2_gru_3ep}"
 OUT_DIR="$CKPT_DIR/CODE2LORA_GRU/${SUFFIX}"
 mkdir -p "$OUT_DIR"
 
-EPOCHS="${EPOCHS:-2}"
+EPOCHS="${EPOCHS:-3}"
 LR="${LR:-5e-5}"
 GRU_HIDDEN="${GRU_HIDDEN:-2048}"
 HEAD_HIDDEN="${HEAD_HIDDEN:-1024}"
@@ -55,15 +56,17 @@ if [ "$LIMIT_TRAIN_REPOS" != "0" ]; then
 fi
 
 echo "===== Train: Code2LoRA-GRU v2 ====="
-echo "Commits dir   : $COMMITS_DIR"
-echo "QnAs dir      : $QNAS_DIR"
-echo "Output dir    : $OUT_DIR"
-echo "Epochs / LR   : $EPOCHS / $LR"
-echo "Start         : $(date)"
+echo "Commits dir       : $COMMITS_DIR"
+echo "Train QnAs dir    : $QNAS_DIR"
+echo "Eval suite QnAs   : $EVAL_QNAS_DIR"
+echo "Output dir        : $OUT_DIR"
+echo "Epochs / LR       : $EPOCHS / $LR"
+echo "Start             : $(date)"
 
 python hypernetwork/train_code2lora_gru_v2.py \
     --commits-dir "$COMMITS_DIR" \
     --qnas-dir "$QNAS_DIR" \
+    --eval-qnas-dir "$EVAL_QNAS_DIR" \
     --output-dir "$OUT_DIR" \
     --model-name Qwen/Qwen2.5-Coder-1.5B \
     --rank 16 --alpha 32 \
