@@ -279,9 +279,12 @@ def _process_repo(
 
 
 def _save_npz(cache_dir: Path, snaps: Dict[str, np.ndarray]) -> None:
-    """Atomic write of snapshot_embeddings.npz."""
+    """Atomic write of snapshot_embeddings.npz.
+    Note: np.savez_compressed auto-appends ``.npz`` if the filename doesn't
+    already end with it -- so the temp file MUST end with ``.npz`` to be
+    written at the path we then os.replace from."""
     snap_npz = cache_dir / "snapshot_embeddings.npz"
-    tmp = cache_dir / "snapshot_embeddings.npz.tmp"
+    tmp = cache_dir / "snapshot_embeddings.tmp.npz"
     np.savez_compressed(tmp, **snaps)
     os.replace(tmp, snap_npz)
 
