@@ -520,6 +520,13 @@ def main() -> None:
         "q_proj", "k_proj", "v_proj", "o_proj",
         "up_proj", "gate_proj", "down_proj",
     ])
+    ap.add_argument("--shard-i", type=int, default=0,
+                    help="0-indexed shard. With --num-shards > 1, only repos "
+                         "whose sorted-index %% num_shards == shard_i are scored.")
+    ap.add_argument("--num-shards", type=int, default=1,
+                    help="Total number of shards across SLURM array tasks. "
+                         "Per-repo incremental writes guarantee that a "
+                         "timeout never loses more than the in-flight repo.")
     args = ap.parse_args()
 
     set_seed(args.seed)
@@ -606,7 +613,25 @@ def main() -> None:
             results[suite] = None
             continue
 
+        # ---- Shard by repo (sorted by repo_id, deterministic round-robin) ----
+        if args.num_shards > 1:
+            data_sorted = sorted(data, key=lambda d: d.get("repo_id", ""))
+            data = [d for i, d in enumerate(data_sorted)
+                    if i % args.num_shards == args.shard_i]
+            print(f"  [{suite}] shard {args.shard_i+1}/{args.num_shards}: "
+                  f"{len(data)} repos", flush=True)
+
         print(f"\n=== Suite: {suite} (repos={len(data)}, keep={keep}) ===", flush=True)
+
+        # ---- Per-suite output path (shard-suffixed) + resume state ----
+        per_suite_out_path: Optional[Path] = None
+        if args.output_json:
+            base = Path(args.output_json)
+            shard_suffix = (f"_shard{args.shard_i}of{args.num_shards}"
+                            if args.num_shards > 1 else "")
+            per_suite_out_path = base.with_name(
+                base.stem + f"__{suite}{shard_suffix}" + base.suffix
+            )
 
         suite_acc = _acc_init()
         timeline_acc: Dict[int, Dict[str, Any]] = defaultdict(_acc_init)
@@ -618,9 +643,48 @@ def main() -> None:
             "final_lora_assertions": 0,
             "repos_with_zero_final": 0,
         }
+        done_repo_ids: set = set()
+        if per_suite_out_path is not None and per_suite_out_path.exists():
+            try:
+                prev = json.loads(per_suite_out_path.read_text(encoding="utf-8"))
+                prev_suite = prev.get(suite) if isinstance(prev, dict) else None
+                if prev_suite and not prev_suite.get("finalized", False):
+                    # Restore the per-repo dict + suite accumulators.
+                    per_repo = dict(prev_suite.get("per_repo", {}))
+                    done_repo_ids = set(per_repo.keys())
+                    # Rebuild suite_acc & timeline_acc from per_repo.
+                    for rid, rentry in per_repo.items():
+                        fin = rentry.get("final", {})
+                        n = int(fin.get("n", 0))
+                        suite_acc["n"] += n
+                        suite_acc["em_sum"] += float(fin.get("exact_match", 0.0)) * n
+                        suite_acc["edit_sum"] += float(fin.get("edit_similarity", 0.0)) * n
+                        suite_acc["bleu_sum"] += float(fin.get("code_bleu", 0.0)) * n
+                        for row in (rentry.get("timeline") or []):
+                            ci = int(row["commit_index"])
+                            rn = int(row.get("n", 0))
+                            tmp = _acc_init()
+                            tmp["n"] = rn
+                            tmp["em_sum"] = float(row.get("exact_match", 0.0)) * rn
+                            tmp["edit_sum"] = float(row.get("edit_similarity", 0.0)) * rn
+                            tmp["bleu_sum"] = float(row.get("code_bleu", 0.0)) * rn
+                            _acc_merge(timeline_acc[ci], tmp)
+                    print(f"  [{suite}] resuming from "
+                          f"{per_suite_out_path}: {len(done_repo_ids)} repos "
+                          f"already done", flush=True)
+            except Exception as e:
+                print(f"  [{suite}] could not parse existing "
+                      f"{per_suite_out_path}: {e}", flush=True)
 
         for ri, repo_item in enumerate(data):
             repo_id = repo_item.get("repo_id", f"repo_{ri}")
+            if repo_id in done_repo_ids:
+                # Skip already-scored repos when resuming.
+                # Free memory for any deferred QnAs we won't need.
+                repo_item.pop("assertions_by_commit", None)
+                repo_item.pop("assertion_splits", None)
+                repo_item.pop(LAZY_QNA_SPEC_KEY, None)
+                continue
             repo_final_acc, per_commit, sanity = _eval_repo_timeline(
                 repo_item=repo_item,
                 code2lora_gru=code2lora_gru,
@@ -674,6 +738,33 @@ def main() -> None:
             repo_item.pop("assertions_by_commit", None)
             repo_item.pop("assertion_splits", None)
             repo_item.pop(LAZY_QNA_SPEC_KEY, None)
+
+            # Per-REPO incremental write: a timeout never loses more than the
+            # one repo currently in flight. Atomic via tmp+os.replace.
+            if per_suite_out_path is not None:
+                interim = {
+                    suite: {
+                        "finalized": False,
+                        "shard_i": int(args.shard_i),
+                        "num_shards": int(args.num_shards),
+                        "n_repos_done": len(per_repo),
+                        "n_repos_total": len(data),
+                        "final": _acc_finalize(suite_acc),
+                        "timeline": [
+                            {"commit_index": int(ci), **_acc_finalize(acc)}
+                            for ci, acc in sorted(timeline_acc.items(),
+                                                   key=lambda x: x[0])
+                        ],
+                        "per_repo": per_repo,
+                        "sanity": dict(suite_sanity, n_assertions_per_split=dict(
+                            suite_sanity["n_assertions_per_split"])),
+                    }
+                }
+                tmp = per_suite_out_path.with_suffix(
+                    per_suite_out_path.suffix + ".tmp")
+                per_suite_out_path.parent.mkdir(parents=True, exist_ok=True)
+                tmp.write_text(json.dumps(interim), encoding="utf-8")
+                os.replace(tmp, per_suite_out_path)
 
             if (ri + 1) % 5 == 0:
                 print(f"  processed {ri+1}/{len(data)} repos", flush=True)
@@ -737,19 +828,25 @@ def main() -> None:
                 flush=True,
             )
 
+        suite_out["finalized"] = True
+        suite_out["shard_i"] = int(args.shard_i)
+        suite_out["num_shards"] = int(args.num_shards)
+        suite_out["n_repos_done"] = len(per_repo)
+        suite_out["n_repos_total"] = len(data)
         results[suite] = suite_out
 
-        # Write intermediate JSON after each completed suite so a timeout
-        # doesn't lose hours of work.
+        # Final per-suite JSON (shard-suffixed when num_shards > 1).
+        if per_suite_out_path is not None:
+            per_suite_out_path.parent.mkdir(parents=True, exist_ok=True)
+            per_suite_out_path.write_text(
+                json.dumps({suite: suite_out}, indent=2), encoding="utf-8",
+            )
+            print(f"  -> wrote FINAL per-suite JSON {per_suite_out_path}",
+                  flush=True)
         if args.output_json:
             out = Path(args.output_json)
             out.parent.mkdir(parents=True, exist_ok=True)
             out.write_text(json.dumps(results, indent=2), encoding="utf-8")
-            # Also write a per-suite file as an extra safety net.
-            per_suite_out = out.with_name(out.stem + f"__{suite}" + out.suffix)
-            per_suite_out.write_text(json.dumps({suite: suite_out}, indent=2),
-                                     encoding="utf-8")
-            print(f"  -> wrote partial results for {suite}", flush=True)
 
     if args.output_json:
         out = Path(args.output_json)

@@ -204,8 +204,20 @@ def score_suite(
     qnas_per_commit_limit: int = 0,
     out_path: Path,
     bootstrap: int = 5000,
+    shard_i: int = 0,
+    num_shards: int = 1,
 ) -> Dict[str, Any]:
-    """Walk one v2 QnA parquet, group by (repo, commit), generate, score."""
+    """Walk one v2 QnA parquet, group by (repo, commit), generate, score.
+
+    Sharding (optional): when ``num_shards > 1``, only repos whose
+    ``sorted_index % num_shards == shard_i`` are scored. The output JSON path
+    is suffixed with ``_shard{i}of{n}`` so multiple shards can be combined
+    later via ``evaluation/merge_eval_shards.py``.
+
+    Resumability: results are written to disk **after every scored
+    (repo, commit) group** -- so a SLURM timeout never loses more than the
+    one commit currently in flight.
+    """
     print(f"\n[suite {suite_name}] loading {qna_path} ...", flush=True)
     rows = load_qna_rows(qna_path)
     # Group by (repo_id, commit_sha) preserving commit_index.
@@ -221,11 +233,21 @@ def score_suite(
           f"{len(groups):,} (repo, commit) groups", flush=True)
 
     if repo_limit:
-        # Keep only the first `repo_limit` repos (sorted by repo_id).
         repos_kept = sorted({r for (r, _) in groups.keys()})[:repo_limit]
         groups = {k: v for k, v in groups.items() if k[0] in repos_kept}
         print(f"[suite {suite_name}] limited to {repo_limit} repos -> "
               f"{len(groups)} (repo, commit) groups", flush=True)
+
+    # ---- Sharding by repo (deterministic round-robin on sorted repo ids) ----
+    all_repos = sorted({r for (r, _) in groups.keys()})
+    if num_shards > 1:
+        kept_repos = {r for k, r in enumerate(all_repos) if k % num_shards == shard_i}
+        groups = {k: v for k, v in groups.items() if k[0] in kept_repos}
+        print(f"[suite {suite_name}] shard {shard_i+1}/{num_shards}: "
+              f"{len(kept_repos)} of {len(all_repos)} repos "
+              f"-> {len(groups)} (repo, commit) groups", flush=True)
+    else:
+        kept_repos = set(all_repos)
 
     bos_id = _get_bos_id(tokenizer)
 
@@ -233,11 +255,42 @@ def score_suite(
     group_keys = sorted(groups.keys(),
                         key=lambda k: (k[0], groups[k]["commit_index"]))
 
-    all_samples: List[Tuple[float, float, float]] = []
+    # ---- Resume from existing on-disk shard file if any ----
     per_commit_records: List[Dict[str, Any]] = []
+    all_samples: List[Tuple[float, float, float]] = []
+    done_keys: set = set()
+    if out_path.exists():
+        try:
+            prev = json.loads(out_path.read_text())
+            if not prev.get("finalized"):
+                per_commit_records = list(prev.get("per_commit", []))
+                done_keys = {(r["repo_id"], r["commit_sha"])
+                             for r in per_commit_records}
+                # Reconstruct raw samples (em,ed,cb) from per-commit averages
+                # weighted by n_qnas. This is an APPROXIMATION used only for
+                # CI bootstrapping at the SHARD level -- merge_eval_shards.py
+                # will recombine using the persisted raw_samples for correct
+                # CIs when those are present.
+                for r in per_commit_records:
+                    n = int(r["n_qnas"])
+                    em = float(r["exact_match"])
+                    ed = float(r["edit_similarity"])
+                    cb = float(r["code_bleu"])
+                    for _ in range(n):
+                        all_samples.append((em, ed, cb))
+                print(f"[suite {suite_name}] resuming: {len(done_keys)} "
+                      f"already-scored (repo, commit) groups on disk",
+                      flush=True)
+        except Exception as e:
+            print(f"[suite {suite_name}] could not parse existing "
+                  f"{out_path}: {e}; starting fresh", flush=True)
+
     t0 = time.time()
-    n_done = 0
+    n_done = len(done_keys)
+    n_done_in_run = 0
     for (repo_id, commit_sha) in group_keys:
+        if (repo_id, commit_sha) in done_keys:
+            continue
         g = groups[(repo_id, commit_sha)]
         pairs = g["pairs"]
         if qnas_per_commit_limit and len(pairs) > qnas_per_commit_limit:
@@ -276,16 +329,22 @@ def score_suite(
                 "code_bleu": cb_m,
             })
         n_done += 1
-        if n_done % 50 == 0 or n_done == len(group_keys):
+        n_done_in_run += 1
+        # Per-(repo, commit) incremental write -- atomic via tmp+replace.
+        _write_suite_json(out_path, suite_name, per_commit_records,
+                          all_samples, bootstrap=0, finalized=False,
+                          shard_i=shard_i, num_shards=num_shards,
+                          n_total_groups=len(group_keys))
+        if n_done_in_run % 25 == 0 or n_done == len(group_keys):
             elapsed = (time.time() - t0) / 60
             done_em = sum(s[0] for s in all_samples) / max(len(all_samples), 1)
-            print(f"  [suite {suite_name}] {n_done}/{len(group_keys)} groups "
+            rate = n_done_in_run / max(elapsed, 1e-6)
+            eta = (len(group_keys) - n_done) / max(rate, 1e-6)
+            print(f"  [suite {suite_name} sh{shard_i+1}/{num_shards}] "
+                  f"{n_done}/{len(group_keys)} groups "
                   f"({len(all_samples):,} qnas) "
-                  f"running_EM={done_em:.4f} elapsed={elapsed:.1f}m",
-                  flush=True)
-            # Incremental write so the file is usable even if the job times out.
-            _write_suite_json(out_path, suite_name, per_commit_records,
-                              all_samples, bootstrap=bootstrap, finalized=False)
+                  f"running_EM={done_em:.4f} elapsed={elapsed:.1f}m "
+                  f"ETA={eta:.1f}m", flush=True)
 
     summary = _summarize(all_samples, bootstrap=bootstrap)
     summary["suite"] = suite_name
@@ -294,8 +353,11 @@ def score_suite(
     summary["n_repos"] = len({r["repo_id"] for r in per_commit_records})
 
     _write_suite_json(out_path, suite_name, per_commit_records, all_samples,
-                      bootstrap=bootstrap, finalized=True, summary=summary)
-    print(f"[suite {suite_name}] DONE  EM={summary['exact_match']:.4f}  "
+                      bootstrap=bootstrap, finalized=True, summary=summary,
+                      shard_i=shard_i, num_shards=num_shards,
+                      n_total_groups=len(group_keys))
+    print(f"[suite {suite_name}] shard {shard_i+1}/{num_shards} DONE  "
+          f"EM={summary['exact_match']:.4f}  "
           f"EditSim={summary['edit_similarity']:.4f}  "
           f"BLEU={summary['code_bleu']:.4f}  ({len(all_samples):,} qnas, "
           f"{len(per_commit_records):,} commits)", flush=True)
@@ -332,19 +394,43 @@ def _write_suite_json(out_path: Path, suite_name: str,
                       *,
                       bootstrap: int,
                       finalized: bool,
-                      summary: Optional[Dict[str, Any]] = None) -> None:
+                      summary: Optional[Dict[str, Any]] = None,
+                      shard_i: int = 0,
+                      num_shards: int = 1,
+                      n_total_groups: int = 0) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if summary is None:
-        summary = _summarize(all_samples, bootstrap=bootstrap)
+        # bootstrap=0 means "skip CIs" -- we recompute them at merge time.
+        summary = _summarize(all_samples, bootstrap=bootstrap) if bootstrap > 0 else {
+            "n_qnas": len(all_samples),
+            "exact_match": (sum(s[0] for s in all_samples) /
+                            max(len(all_samples), 1)) if all_samples else 0.0,
+            "edit_similarity": (sum(s[1] for s in all_samples) /
+                                max(len(all_samples), 1)) if all_samples else 0.0,
+            "code_bleu": (sum(s[2] for s in all_samples) /
+                          max(len(all_samples), 1)) if all_samples else 0.0,
+        }
         summary["suite"] = suite_name
         summary["n_qnas"] = len(all_samples)
         summary["n_scored_commits"] = len(per_commit_records)
         summary["n_repos"] = len({r["repo_id"] for r in per_commit_records})
-    payload = {
+    payload: Dict[str, Any] = {
         "finalized": finalized,
+        "shard_i": int(shard_i),
+        "num_shards": int(num_shards),
+        "n_total_groups": int(n_total_groups),
         "summary": summary,
         "per_commit": per_commit_records,
     }
+    # Persist raw per-sample (em, ed, cb) tuples too so a downstream merge
+    # can compute exact bootstrap CIs on the union across shards. Stored as
+    # parallel arrays (smaller JSON than list-of-tuples).
+    if finalized:
+        payload["raw_samples"] = {
+            "exact_match": [int(s[0]) for s in all_samples],
+            "edit_similarity": [float(s[1]) for s in all_samples],
+            "code_bleu": [float(s[2]) for s in all_samples],
+        }
     tmp = out_path.with_suffix(out_path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload))
     os.replace(tmp, out_path)
@@ -385,6 +471,13 @@ def main() -> None:
                          "commit. 0 = no cap.")
     ap.add_argument("--bootstrap", type=int, default=5000)
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--shard-i", type=int, default=0,
+                    help="0-indexed shard ID; with --num-shards > 1 only "
+                         "score repos whose sorted-index % num_shards == shard_i.")
+    ap.add_argument("--num-shards", type=int, default=1,
+                    help="Total number of shards. Use SLURM job arrays to "
+                         "fan out across GPUs; results land in suffixed "
+                         "JSONs that merge_eval_shards.py recombines.")
     args = ap.parse_args()
 
     device = torch.device(args.device if (args.device != "cuda" or torch.cuda.is_available()) else "cpu")
@@ -396,6 +489,8 @@ def main() -> None:
         args.method, args.base_model, ckpt, device=device,
     )
 
+    shard_suffix = (f"_shard{args.shard_i}of{args.num_shards}"
+                    if args.num_shards > 1 else "")
     suite_summaries: Dict[str, Any] = {}
     for suite in args.suites:
         qna_path = Path(args.qna_dir) / f"{suite}.parquet"
@@ -403,7 +498,7 @@ def main() -> None:
             print(f"[suite {suite}] MISSING parquet {qna_path}, skipping",
                   flush=True)
             continue
-        out_path = out_dir / f"baseline_{args.method}_{suite}.json"
+        out_path = out_dir / f"baseline_{args.method}_{suite}{shard_suffix}.json"
         s = score_suite(
             qna_path=qna_path, suite_name=suite,
             model=model, tokenizer=tok, device=device,
@@ -414,11 +509,13 @@ def main() -> None:
             qnas_per_commit_limit=args.qnas_per_commit_limit,
             out_path=out_path,
             bootstrap=args.bootstrap,
+            shard_i=args.shard_i,
+            num_shards=args.num_shards,
         )
         suite_summaries[suite] = s
 
-    # Final cross-suite summary file.
-    summary_path = out_dir / f"baseline_{args.method}_summary.json"
+    # Final cross-suite summary file (per shard; merge later).
+    summary_path = out_dir / f"baseline_{args.method}_summary{shard_suffix}.json"
     summary_path.write_text(json.dumps({
         "method": args.method,
         "base_model": args.base_model,

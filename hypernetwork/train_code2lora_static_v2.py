@@ -296,10 +296,23 @@ def main() -> None:
                     help="Cap snapshots per eval suite (for speed; 0 = no cap).")
     ap.add_argument("--save-every-steps", type=int, default=0,
                     help="0 = save only when primary eval improves.")
+    ap.add_argument("--log-every-iters", type=int, default=50,
+                    help="Print running training loss every N training iters.")
+    ap.add_argument("--skip-eval", action="store_true",
+                    help="Skip ALL validation (mid-step + end-of-epoch). "
+                         "Only train and save per-epoch checkpoints. Useful "
+                         "when you want to maximize training throughput and "
+                         "evaluate from saved checkpoints offline.")
 
     ap.add_argument("--seed", type=int, default=3407)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--limit-train-repos", type=int, default=0)
+    ap.add_argument("--gradient-checkpointing", action="store_true", default=True,
+                    help="Recompute base-model activations during backward "
+                         "(memory-friendly; required for the 720M-param head). "
+                         "Pass --no-gradient-checkpointing to disable.")
+    ap.add_argument("--no-gradient-checkpointing", dest="gradient_checkpointing",
+                    action="store_false")
     args = ap.parse_args()
 
     out_dir = Path(args.output_dir)
@@ -347,6 +360,15 @@ def main() -> None:
     base_model.eval()
     for p in base_model.parameters():
         p.requires_grad = False
+    if args.gradient_checkpointing:
+        # Required to make 720M-param hypernet head fit alongside the 1.5B base
+        # at seq_len up to 8192. Recomputes attention activations during backward
+        # (no penalty for base-weight grads -- they don't exist).
+        base_model.config.use_cache = False
+        base_model.gradient_checkpointing_enable(
+            gradient_checkpointing_kwargs={"use_reentrant": False},
+        )
+        print("  gradient checkpointing: ON", flush=True)
     specs = get_module_specs(base_model, args.target_modules)
     type_dims = discover_module_types_and_dims(specs)
     print(f"  discovered {len(specs)} target modules, "
@@ -369,20 +391,23 @@ def main() -> None:
     sched = get_cosine_schedule_with_warmup(optim, warmup_steps, total_steps)
 
     # ---- Eval suites ----
-    print("Loading eval suites ...", flush=True)
     eval_suites: Dict[str, Dict[str, Any]] = {}
-    for suite in args.eval_suites:
-        c = load_snapshot_rows(snap_dir / "commits" / f"{suite}.parquet")
-        if args.limit_eval_snapshots and len(c) > args.limit_eval_snapshots:
-            c = c[: args.limit_eval_snapshots]
-        keys = [(r.repo_id, r.commit_sha) for r in c]
-        q = load_qna_rows(snap_dir / "qna" / f"{suite}.parquet",
-                          commit_keys=keys)
-        eval_suites[suite] = {
-            "snap_rows": c,
-            "qnas_by_key": _group_qnas_by_key(q),
-        }
-        print(f"  {suite}: {len(c)} snapshots, {len(q)} qnas", flush=True)
+    if args.skip_eval:
+        print("Skipping eval suite loading (--skip-eval)", flush=True)
+    else:
+        print("Loading eval suites ...", flush=True)
+        for suite in args.eval_suites:
+            c = load_snapshot_rows(snap_dir / "commits" / f"{suite}.parquet")
+            if args.limit_eval_snapshots and len(c) > args.limit_eval_snapshots:
+                c = c[: args.limit_eval_snapshots]
+            keys = [(r.repo_id, r.commit_sha) for r in c]
+            q = load_qna_rows(snap_dir / "qna" / f"{suite}.parquet",
+                              commit_keys=keys)
+            eval_suites[suite] = {
+                "snap_rows": c,
+                "qnas_by_key": _group_qnas_by_key(q),
+            }
+            print(f"  {suite}: {len(c)} snapshots, {len(q)} qnas", flush=True)
 
     # ---- Train ----
     metrics_log: List[Dict[str, Any]] = []
@@ -399,22 +424,37 @@ def main() -> None:
             sample = ds[di]
             if sample is None:
                 continue
+            # ctx is a tiny (1, 2048) embedding -- moved to device once.
             ctx = torch.from_numpy(sample["embedding"]).to(device).unsqueeze(0)
-            head_out = head(ctx)
-            inject_lora_weights(base_model, specs, head_out, batch_index=0)
 
             qnas = sample["qnas"]
             prefixes = [q["prefix"] for q in qnas]
             targets = [q["target"] for q in qnas]
-            n_tok_seen = 0
-            loss_acc = 0.0
+            # Pre-tokenize all micro-batches for this snapshot.
+            micro_batches: List[Dict[str, torch.Tensor]] = []
             for i in range(0, len(prefixes), args.lm_micro_batch):
                 j = min(i + args.lm_micro_batch, len(prefixes))
-                batch = _tokenize_lm_batch(tokenizer, prefixes[i:j], targets[i:j],
-                                           max_seq_len=args.max_seq_len)
-                if not batch:
-                    continue
-                batch = {k: v.to(device) for k, v in batch.items()}
+                b = _tokenize_lm_batch(tokenizer, prefixes[i:j], targets[i:j],
+                                       max_seq_len=args.max_seq_len)
+                if b:
+                    micro_batches.append({k: v.to(device) for k, v in b.items()})
+            if not micro_batches:
+                continue
+            n_tok_seen = 0
+            loss_acc = 0.0
+            # IMPORTANT memory pattern: recompute head(ctx) ONCE PER MICRO-BATCH.
+            # The head is small (~720M MACs, ~ms on H100); recomputing buys us
+            # the right to call `loss.backward()` WITHOUT `retain_graph=True`,
+            # which lets autograd fully free the per-mb graph (LM activations
+            # through the LoRA wrappers + head trunk + head heads). Gradients
+            # still accumulate in `head.parameters()` across micro-batches
+            # because we don't call zero_grad() in between -- AdamW.step() at
+            # the end of the snapshot consumes the accumulated grad. This is
+            # the same accumulation pattern as DataParallel / grad-accum
+            # training, just expressed inside one Python loop.
+            for batch in micro_batches:
+                head_out = head(ctx)
+                inject_lora_weights(base_model, specs, head_out, batch_index=0)
                 out = base_model(**batch)
                 ntok = (batch["labels"] != -100).sum().item()
                 loss = out.loss * ntok
@@ -434,7 +474,7 @@ def main() -> None:
 
             running_loss += loss_acc
             running_n += n_tok_seen
-            if it % 50 == 0:
+            if it % max(1, args.log_every_iters) == 0:
                 avg = running_loss / max(running_n, 1)
                 elapsed = (time.time() - t0) / 60
                 print(f"[ep{epoch} it{it}/{len(order)} step{global_step}] "
@@ -443,29 +483,36 @@ def main() -> None:
                 running_loss = 0.0
                 running_n = 0
 
-            if args.eval_every_steps > 0 and global_step > 0 and \
-                    global_step % args.eval_every_steps == 0 and \
-                    (it + 1) % args.grad_accum == 0:
+            if not args.skip_eval and args.eval_every_steps > 0 \
+                    and global_step > 0 \
+                    and global_step % args.eval_every_steps == 0 \
+                    and (it + 1) % args.grad_accum == 0:
                 _do_eval(args, base_model, head, specs, tokenizer,
                          eval_suites, device, out_dir, metrics_log,
                          best_eval_ref=[best_eval],
                          global_step=global_step, epoch=epoch)
                 best_eval = min(best_eval, metrics_log[-1].get("eval_loss", float("inf")))
 
-        # End of epoch: ALWAYS save the checkpoint FIRST, then validate. The
-        # epoch's weights are persisted even if eval later runs out of time
-        # or the SLURM job is killed.
+        # End of epoch: ALWAYS save the checkpoint FIRST, then (optionally)
+        # validate. The epoch's weights are persisted even if eval is skipped
+        # or later runs out of time / is killed.
         type_dims = head.type_dims
         ep_path = _save_ckpt(out_dir, head, type_dims, args, name=f"ep{epoch}")
         latest_path = _save_ckpt(out_dir, head, type_dims, args, name="latest")
         print(f"  [ckpt] end-of-epoch ep{epoch} -> {ep_path} "
               f"(also updated {latest_path})", flush=True)
-        _do_eval(args, base_model, head, specs, tokenizer, eval_suites,
-                 device, out_dir, metrics_log, best_eval_ref=[best_eval],
-                 global_step=global_step, epoch=epoch, end_of_epoch=True)
-        best_eval = min(best_eval, metrics_log[-1].get("eval_loss", float("inf")))
+        if args.skip_eval:
+            print(f"  [eval] skipped (--skip-eval) after ep{epoch}", flush=True)
+        else:
+            _do_eval(args, base_model, head, specs, tokenizer, eval_suites,
+                     device, out_dir, metrics_log, best_eval_ref=[best_eval],
+                     global_step=global_step, epoch=epoch, end_of_epoch=True)
+            best_eval = min(best_eval, metrics_log[-1].get("eval_loss", float("inf")))
 
-    print(f"\nTraining done. Best primary eval = {best_eval:.4f}", flush=True)
+    if args.skip_eval:
+        print(f"\nTraining done. (eval skipped)", flush=True)
+    else:
+        print(f"\nTraining done. Best primary eval = {best_eval:.4f}", flush=True)
 
 
 def _save_ckpt(out_dir: Path, head: Code2LoRAHead, type_dims, args,

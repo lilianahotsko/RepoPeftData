@@ -2,7 +2,7 @@
 #SBATCH --job-name=train_c2l_static_v2
 #SBATCH --output=slurm_logs/train_c2l_static_v2_%j.out
 #SBATCH --error=slurm_logs/train_c2l_static_v2_%j.err
-#SBATCH --time=24:00:00
+#SBATCH --time=08:00:00
 #SBATCH --gres=gpu:h100:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=96G
@@ -40,10 +40,17 @@ MAX_SEQ_LEN="${MAX_SEQ_LEN:-8192}"
 EVAL_EVERY="${EVAL_EVERY:-500}"
 LIMIT_EVAL_SNAPS="${LIMIT_EVAL_SNAPS:-200}"
 LIMIT_TRAIN_REPOS="${LIMIT_TRAIN_REPOS:-0}"
+LOG_EVERY_ITERS="${LOG_EVERY_ITERS:-50}"
+# Default to skipping validation during training: just save per-epoch ckpts
+# and run evaluation offline via the sharded baseline / static-eval pipeline.
+SKIP_EVAL="${SKIP_EVAL:-1}"
 
 EXTRA_ARGS=()
 if [ "$LIMIT_TRAIN_REPOS" != "0" ]; then
     EXTRA_ARGS+=(--limit-train-repos "$LIMIT_TRAIN_REPOS")
+fi
+if [ "$SKIP_EVAL" = "1" ]; then
+    EXTRA_ARGS+=(--skip-eval)
 fi
 
 echo "===== Train: Code2LoRA static v2 ====="
@@ -65,6 +72,7 @@ python hypernetwork/train_code2lora_static_v2.py \
     --eval-suites cr_val ir_val \
     --primary-eval-suite cr_val \
     --limit-eval-snapshots "$LIMIT_EVAL_SNAPS" \
+    --log-every-iters "$LOG_EVERY_ITERS" \
     --seed 3407 \
     "${EXTRA_ARGS[@]}"
 
