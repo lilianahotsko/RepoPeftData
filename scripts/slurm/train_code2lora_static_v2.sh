@@ -2,7 +2,7 @@
 #SBATCH --job-name=train_c2l_static_v2
 #SBATCH --output=slurm_logs/train_c2l_static_v2_%j.out
 #SBATCH --error=slurm_logs/train_c2l_static_v2_%j.err
-#SBATCH --time=08:00:00
+#SBATCH --time=03:00:00
 #SBATCH --gres=gpu:h100:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=96G

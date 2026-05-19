@@ -2,7 +2,7 @@
 #SBATCH --job-name=eval_gru_legacy_sh
 #SBATCH --output=slurm_logs/eval_gru_legacy_sh_%A_%a.out
 #SBATCH --error=slurm_logs/eval_gru_legacy_sh_%A_%a.err
-#SBATCH --time=02:00:00
+#SBATCH --time=03:00:00
 #SBATCH --gres=gpu:h100:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=128G
