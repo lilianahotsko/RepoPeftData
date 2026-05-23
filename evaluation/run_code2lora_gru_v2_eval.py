@@ -517,6 +517,16 @@ def main() -> None:
 
     commits_parquet = Path(args.commits_dir) / "commits" / f"{args.suite}.parquet"
     qna_parquet = Path(args.qnas_dir) / "qna" / f"{args.suite}.parquet"
+    # In-repo suites (ir_val / ir_test) share the 400-repo timeline that's
+    # already materialized in commits/train.parquet (in_repo_split tags val/test
+    # rows inside it). Only cr_* have their own dedicated commits parquet.
+    if not commits_parquet.exists() and args.suite.startswith("ir_"):
+        fallback = Path(args.commits_dir) / "commits" / "train.parquet"
+        if fallback.exists():
+            print(f"[info] {commits_parquet.name} not found; using train.parquet "
+                  f"(filtered to in_repo_split={in_repo_splits}) instead",
+                  flush=True)
+            commits_parquet = fallback
     if not commits_parquet.exists():
         raise SystemExit(f"missing commits parquet: {commits_parquet}")
     if not qna_parquet.exists():

@@ -511,6 +511,9 @@ class QnaRow:
     test_function: str
     prefix: str
     target: str
+    lineno: int = 0
+    col_offset: int = 0
+    assertion_event_id: str = ""
 
 
 def load_qna_rows(parquet_path: Path,
@@ -525,6 +528,7 @@ def load_qna_rows(parquet_path: Path,
     needed = [c for c in (
         "repo_id", "commit_sha", "commit_index", "in_repo_split",
         "cross_repo_split", "test_file", "test_function", "prefix", "target",
+        "lineno", "col_offset", "assertion_event_id",
     ) if c in ds.schema.names]
     filters: List[Any] = []
     if in_repo_splits:
@@ -542,15 +546,19 @@ def load_qna_rows(parquet_path: Path,
         flt = f if flt is None else (flt & f)
     table = ds.to_table(columns=needed, filter=flt)
     rows: List[QnaRow] = []
+    cols = set(table.column_names)
     repo_col = table.column("repo_id").to_pylist()
     sha_col = table.column("commit_sha").to_pylist()
-    idx_col = table.column("commit_index").to_pylist() if "commit_index" in table.column_names else [-1] * table.num_rows
-    irs_col = table.column("in_repo_split").to_pylist() if "in_repo_split" in table.column_names else [""] * table.num_rows
-    crs_col = table.column("cross_repo_split").to_pylist() if "cross_repo_split" in table.column_names else [""] * table.num_rows
-    tf_col = table.column("test_file").to_pylist() if "test_file" in table.column_names else [""] * table.num_rows
-    tfun_col = table.column("test_function").to_pylist() if "test_function" in table.column_names else [""] * table.num_rows
+    idx_col = table.column("commit_index").to_pylist() if "commit_index" in cols else [-1] * table.num_rows
+    irs_col = table.column("in_repo_split").to_pylist() if "in_repo_split" in cols else [""] * table.num_rows
+    crs_col = table.column("cross_repo_split").to_pylist() if "cross_repo_split" in cols else [""] * table.num_rows
+    tf_col = table.column("test_file").to_pylist() if "test_file" in cols else [""] * table.num_rows
+    tfun_col = table.column("test_function").to_pylist() if "test_function" in cols else [""] * table.num_rows
     prefix_col = table.column("prefix").to_pylist()
     target_col = table.column("target").to_pylist()
+    lineno_col = table.column("lineno").to_pylist() if "lineno" in cols else [0] * table.num_rows
+    col_off_col = table.column("col_offset").to_pylist() if "col_offset" in cols else [0] * table.num_rows
+    eid_col = table.column("assertion_event_id").to_pylist() if "assertion_event_id" in cols else [""] * table.num_rows
     keep_set = set(commit_keys) if commit_keys else None
     for i in range(table.num_rows):
         key = (repo_col[i], sha_col[i])
@@ -565,6 +573,9 @@ def load_qna_rows(parquet_path: Path,
             test_function=tfun_col[i] or "",
             prefix=prefix_col[i] or "",
             target=target_col[i] or "",
+            lineno=int(lineno_col[i]) if lineno_col[i] is not None else 0,
+            col_offset=int(col_off_col[i]) if col_off_col[i] is not None else 0,
+            assertion_event_id=eid_col[i] or "",
         ))
     return rows
 

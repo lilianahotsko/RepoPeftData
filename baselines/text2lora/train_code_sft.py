@@ -51,6 +51,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from hyper_llm_modulator.configs import ArgumentParser, TrainingArguments
 from hyper_llm_modulator.hyper_modulator import create_hypermod, save_hypermod_checkpoint
+from hyper_llm_modulator.hooks import remove_hook_handles_
 from hyper_llm_modulator.sft_trainer import (
     get_loss_batch,
     trl_activate_neftune,
@@ -216,11 +217,78 @@ def build_datasets(split_items, code_embs, tokenizer, max_length):
     return ds_list
 
 
+def _load_qna_items_from_parquet_v2(qna_parquet_dir: Path, suite: str,
+                                    val_qnas_per_commit: int = 0,
+                                    val_subsample_total: int = 0,
+                                    seed: int = 42) -> list[dict]:
+    """Load the v2 commit-derived QnA pool as a flat list of items with
+    the same ``{"prefix", "target", "repo"}`` shape ``load_split`` returns
+    for v1, so the rest of the SFT pipeline can stay unchanged.
+
+    Optional capping (``val_qnas_per_commit``) and global subsampling
+    (``val_subsample_total``) are applied for the validation suite to
+    keep per-epoch validation cheap.
+    """
+    import pyarrow.parquet as pq
+
+    path = qna_parquet_dir / f"{suite}.parquet"
+    if not path.exists():
+        raise FileNotFoundError(f"v2 qna parquet missing: {path}")
+
+    tbl = pq.read_table(
+        str(path),
+        columns=["repo_id", "commit_sha", "prefix", "target"],
+    )
+    repos = tbl["repo_id"].to_pylist()
+    shas = tbl["commit_sha"].to_pylist()
+    prefixes = tbl["prefix"].to_pylist()
+    targets = tbl["target"].to_pylist()
+    items: list[dict] = []
+    per_group_count: dict[tuple, int] = defaultdict(int)
+    cap = int(val_qnas_per_commit or 0)
+    for r, s, p, t in zip(repos, shas, prefixes, targets):
+        if not r or not p or not t:
+            continue
+        if cap > 0:
+            k = (r, s)
+            if per_group_count[k] >= cap:
+                continue
+            per_group_count[k] += 1
+        items.append({"repo": r, "prefix": p, "target": t})
+
+    total_cap = int(val_subsample_total or 0)
+    if total_cap > 0 and len(items) > total_cap:
+        rng = random.Random(seed)
+        items = rng.sample(items, total_cap)
+    return items
+
+
 def build_loaders(args, code_embs, tokenizer, splits_dir):
-    logger.info("Loading RepoPeftBench train split …")
-    train_items = load_split(Path(splits_dir), "train")
-    logger.info("Loading RepoPeftBench ir_val split …")
-    val_items = load_split(Path(splits_dir), "ir_val")
+    qna_source = getattr(args, "qna_source", "flat_json") or "flat_json"
+    if qna_source == "parquet_v2":
+        if not getattr(args, "qna_parquet_dir", None):
+            raise ValueError(
+                "qna_source='parquet_v2' requires 'qna_parquet_dir' in the config."
+            )
+        qpd = Path(args.qna_parquet_dir)
+        logger.info(f"[v2] Loading train QnAs from {qpd / 'train.parquet'} ...")
+        train_items = _load_qna_items_from_parquet_v2(qpd, "train")
+        logger.info(f"[v2]   -> {len(train_items)} train items")
+        logger.info(f"[v2] Loading ir_val QnAs from {qpd / 'ir_val.parquet'} "
+                    f"(per-commit cap={args.val_qnas_per_commit}, "
+                    f"global cap={args.val_subsample_total}) ...")
+        val_items = _load_qna_items_from_parquet_v2(
+            qpd, "ir_val",
+            val_qnas_per_commit=int(args.val_qnas_per_commit or 0),
+            val_subsample_total=int(args.val_subsample_total or 0),
+            seed=int(args.seed),
+        )
+        logger.info(f"[v2]   -> {len(val_items)} val items")
+    else:
+        logger.info("Loading RepoPeftBench train split …")
+        train_items = load_split(Path(splits_dir), "train")
+        logger.info("Loading RepoPeftBench ir_val split …")
+        val_items = load_split(Path(splits_dir), "ir_val")
 
     train_ds = build_datasets(train_items, code_embs, tokenizer, args.inp_max_len)
     val_ds = build_datasets(val_items, code_embs, tokenizer, args.inp_max_len)
@@ -298,6 +366,7 @@ def train_loop(
         _glb,
         label_smoothing=args.label_smoothing,
         l2_reg_generated_w=args.l2_reg_generated_w,
+        return_hook_handles=True,
     )
 
     neftune_handle = trl_activate_neftune(model, args.neftune_noise_alpha)
@@ -314,17 +383,25 @@ def train_loop(
         for batch in (pbar := tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.epochs}")):
             with accelerator.accumulate(model), accelerator.autocast():
                 bl = _glb_train(batch)
+                hook_handles = bl.pop("hook_handles", [])
                 loss = bl["sft_loss"] + bl["generated_w_l2_loss"]
                 avg["train/sft_loss"].append(bl["sft_loss"].item())
                 avg["train/gen_w_l2"].append(bl["generated_w_l2_loss"].item())
                 avg["train/total_loss"].append(loss.item())
 
                 optimizer.zero_grad()
-                accelerator.backward(loss)
-                if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(model.parameters(), args.max_grad_norm)
-                optimizer.step()
-                scheduler.step()
+                try:
+                    accelerator.backward(loss)
+                    if accelerator.sync_gradients:
+                        accelerator.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+                    optimizer.step()
+                    scheduler.step()
+                finally:
+                    # Hooks must remain attached through backward() so that
+                    # gradient-checkpointing recomputation observes the same
+                    # forward graph as the original pass. Remove only after
+                    # the backward has consumed the saved activations.
+                    remove_hook_handles_(hook_handles)
 
             pbar.set_postfix(loss=f"{loss.item():.4f}")
 
@@ -432,6 +509,12 @@ def main(args):
         task_type="CAUSAL_LM",
         bias="none",
     )
+    # Upstream get_tokenizer (text2lora/src/hyper_llm_modulator/utils/
+    # model_loading.py:46-47) overwrites the explicit ``model_path`` arg
+    # with ``peft_config.base_model_name_or_path`` whenever peft_config
+    # is truthy, so we must pin it here (the canonical ``get_peft_config``
+    # helper does the same at line 115 of model_loading.py).
+    peft_config.base_model_name_or_path = args.model_dir
     peft_config.save_pretrained(os.path.join(orig_cwd, save_dir))
 
     model, tokenizer = get_model_and_tokenizer(
@@ -442,6 +525,20 @@ def main(args):
         model_kwargs={"output_hidden_states": True, "output_attentions": False},
         device=device,
     )
+
+    # Activation memory in this trainer is dominated by the per-token LoRA bmm
+    # ``hyper_llm_modulator/hooks.py:lora_hook`` (x.repeat_interleave(inp_len))
+    # so even attention-only target_modules and n_tasks_per_batch=2 OOM at
+    # ~78GiB on H100. Gradient-checkpoint the frozen base model: the LoRA hook
+    # activations get recomputed on the backward pass (which the hypernet
+    # still backprops through correctly because the generated A/B tensors
+    # persist in scope). Cuts peak memory roughly in half.
+    if hasattr(model, "gradient_checkpointing_enable"):
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+    if hasattr(model, "enable_input_require_grads"):
+        model.enable_input_require_grads()
+    if hasattr(model, "config"):
+        model.config.use_cache = False
 
     layer_indices = torch.tensor(range(len(get_layers(model))), dtype=torch.long, device=device)
 
@@ -516,8 +613,15 @@ if __name__ == "__main__":
         print("ERROR: config must include 'code_emb_path'")
         sys.exit(1)
 
-    uid = "".join([random.choice(string.ascii_letters + string.digits) for _ in range(8)])
-    args.run_name = "code_sft_" + time.strftime("%Y%m%d-%H%M%S") + f"_{uid}"
+    # Allow the SLURM driver to pin the run-name (and hence the save-dir)
+    # so a downstream eval job can predict the artifact path before the
+    # training job has started -- needed for --dependency=afterok wiring.
+    env_run_name = os.environ.get("T2L_RUN_NAME", "").strip()
+    if env_run_name:
+        args.run_name = env_run_name
+    else:
+        uid = "".join([random.choice(string.ascii_letters + string.digits) for _ in range(8)])
+        args.run_name = "code_sft_" + time.strftime("%Y%m%d-%H%M%S") + f"_{uid}"
     args.save_dir = f"text2lora/train_outputs/sft/hyper_lora/{args.run_name}"
 
     global logger

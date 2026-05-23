@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Unified v2 baseline evaluator -- scores **pretrained**, **FFT**, and
-**SLoRA** on exactly the same (repo, commit, qna) triples as the v2
-Code2LoRA trainers (``hypernetwork/train_code2lora_{static,gru}_v2.py``).
+"""Unified v2 baseline evaluator -- scores **pretrained**, **FFT**,
+**SLoRA**, **RAG**, **DRC**, **Text2LoRA**, and **Doc2LoRA** on exactly
+the same (repo, commit, qna) triples as the v2 Code2LoRA trainers
+(``hypernetwork/train_code2lora_{static,gru}_v2.py``).
 
 The evaluator pulls QnAs from a v2 parquet suite -- by default the
 *Dataset A* (GRU-aligned) parquets at
@@ -30,6 +31,37 @@ Methods
 * ``slora``       Single LoRA shared across repos; ``--ckpt`` must contain
                   a PEFT adapter (output of
                   ``baselines/single_lora/train_slora_v2.py``).
+* ``rag``         Pretrained + top-k retrieval over a per-commit chunk
+                  index (built by
+                  ``evaluation/build_rag_cache_per_commit.py``).
+                  Requires ``--rag-cache-dir`` and optionally
+                  ``--rag-top-k`` (default 3) and
+                  ``--rag-embed-model-name``.
+* ``drc``         Pretrained + dependency-resolved context prepended to
+                  the prefix (precomputed by
+                  ``evaluation/build_drc_cache_per_commit.py``).
+                  Requires ``--drc-cache-dir`` and optionally
+                  ``--drc-max-tokens`` (default 4096; adaptive
+                  compression via ``evaluation.compress_context``).
+* ``text2lora``   Code-conditioned Text2LoRA hypernet (Code-SFT v2
+                  variant). Generates per-repo LoRA weights from a
+                  precomputed 2048-d code embedding (the v2 anchor-
+                  commit ``repo_state_embedding``) and applies them
+                  through the PEFT wrapper before scoring. Requires
+                  ``--text2lora-hypermod-dir`` (run dir produced by
+                  ``baselines/text2lora/train_code_sft.py``) and
+                  ``--text2lora-code-emb-path`` (``code_embeddings_v2.pt``
+                  from ``baselines/text2lora/extract_code_embeddings_v2.py``).
+                  Repos without an embedding fall back to pretrained.
+* ``doc2lora``    Doc-to-LoRA (Sakana D2L). Internalizes the per-
+                  ``(repo, commit_sha)`` DRC context into LoRA weights
+                  via ``ModulatedPretrainedModel.internalize`` and
+                  generates with ``model.base_model.generate``. Requires
+                  ``--doc2lora-ckpt`` (a ``pytorch_model.bin`` produced
+                  by ``baselines/doc2lora/train_doc2lora_v2.sh``) and
+                  ``--doc2lora-drc-cache-dir`` (the same per-commit DRC
+                  cache the DRC baseline uses). Commits without a DRC
+                  cache fall back to the un-adapted base model.
 
 Truncation policy matches the v2 Code2LoRA trainers: **left-truncate, left-pad**
 so the assertion-adjacent code is preserved.
@@ -78,11 +110,319 @@ DEFAULT_QNA_DIR = "/scratch/lhotsko/REPO_DATASET/code2lora_snapshots_hf/qna"
 # Model loading
 # ---------------------------------------------------------------------------
 
+def _slug_repo(repo_name: str) -> str:
+    """Convert ``foo/bar`` -> ``foo__bar`` (matches the slug used by
+    ``baselines/text2lora/extract_code_embeddings_v2.py`` and the v1
+    ``extract_code_embeddings.py``)."""
+    return repo_name.replace("/", "__")
+
+
+def _load_text2lora_bundle(hypermod_dir: Path, text2lora_dir: Path,
+                           code_emb_path: Path, device: torch.device,
+                           dtype: torch.dtype):
+    """Build (tokenizer, peft_model, hypermod, layer_indices, code_embs)
+    for the Text2LoRA Code-SFT baseline.
+
+    Mirrors the manual checkpoint-load path in
+    ``baselines/text2lora/evaluate_text2lora_code.py`` (the canonical
+    ``load_hypermod_checkpoint`` infers ``task_emb_size`` from the
+    embedding LLM, but here the code embedding *is* the task embedding,
+    so we override it from the .pt artifact).
+    """
+    # Local imports -- only the text2lora method needs them.
+    import argparse as _argparse
+    import yaml as _yaml
+    from peft import PeftConfig as _PeftConfig
+    from peft import get_peft_config as _get_peft_config
+    from hyper_llm_modulator.hyper_modulator import (
+        create_hypermod as _create_hypermod,
+    )
+    from hyper_llm_modulator.utils import get_layers as _get_layers
+    from hyper_llm_modulator.utils.model_loading import (
+        get_model_and_tokenizer as _get_model_and_tokenizer,
+    )
+
+    hypermod_dir = hypermod_dir.expanduser().resolve()
+    text2lora_dir = text2lora_dir.expanduser().resolve()
+    code_emb_path = code_emb_path.expanduser().resolve()
+
+    print(f"[load] Text2LoRA: hypermod_dir={hypermod_dir}", flush=True)
+    print(f"[load]            code_emb_path={code_emb_path}", flush=True)
+    print(f"[load]            text2lora_dir={text2lora_dir}", flush=True)
+
+    # ---- Code embeddings (one vec per repo) ----
+    code_embs = torch.load(
+        str(code_emb_path), map_location="cpu", weights_only=True,
+    )
+    task_emb_size = int(next(iter(code_embs.values())).shape[-1])
+    print(f"[load] code_embs: {len(code_embs)} repos, dim={task_emb_size}",
+          flush=True)
+
+    # ---- Re-build model + PEFT wrapper exactly the way training did ----
+    # The hypernet's adapter_config.json + args.yaml were written next to
+    # ``hypermod.pt`` by ``save_hypermod_checkpoint``.
+    ckpt_path = hypermod_dir / "hypermod.pt"
+    if not ckpt_path.exists():
+        raise SystemExit(f"text2lora hypermod.pt not found: {ckpt_path}")
+    hargs = _argparse.Namespace(
+        **_yaml.safe_load((hypermod_dir / "args.yaml").read_text())
+    )
+    peft_config = _get_peft_config(
+        _PeftConfig.from_json_file(str(hypermod_dir / "adapter_config.json"))
+    )
+    state_dict = torch.load(str(ckpt_path), map_location=device)
+
+    # Some chat-template path lookups inside get_model_and_tokenizer
+    # resolve relative to text2lora/; cd in/out around the call.
+    orig_cwd = os.getcwd()
+    os.chdir(str(text2lora_dir))
+    try:
+        model, tokenizer = _get_model_and_tokenizer(
+            hargs.model_dir,
+            train=False,
+            requires_grad=False,
+            peft_config=peft_config,
+            model_kwargs={
+                "output_hidden_states": True,
+                "output_attentions": False,
+                "torch_dtype": dtype,
+            },
+            device=device,
+        )
+    finally:
+        os.chdir(orig_cwd)
+
+    layer_indices = torch.tensor(
+        list(range(len(_get_layers(model)))),
+        dtype=torch.long, device=device,
+    )
+
+    hypermod = _create_hypermod(
+        hargs, peft_config.peft_type.lower(), device, model,
+        layer_indices, task_emb_size, from_scratch=False,
+    )
+    info = hypermod.load_state_dict(state_dict, strict=False)
+    print(f"[load] hypermod state_dict: missing={len(info.missing_keys)}, "
+          f"unexpected={len(info.unexpected_keys)}", flush=True)
+    hypermod.eval()
+    model.eval()
+    if hasattr(model.config, "use_cache"):
+        model.config.use_cache = True
+    for p in model.parameters():
+        p.requires_grad = False
+    for p in hypermod.parameters():
+        p.requires_grad = False
+
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    return tokenizer, model, hypermod, layer_indices, code_embs
+
+
+# ---------------------------------------------------------------------------
+# Doc-to-LoRA bundle: load ModulatedPretrainedModel + per-commit internalize
+# ---------------------------------------------------------------------------
+
+def _resolve_doc2lora_ckpt(ckpt: Path) -> Path:
+    """Accept any of: ``pytorch_model.bin`` file, ``checkpoint-XXXX`` dir,
+    or run-dir (containing ``checkpoint-*`` sub-dirs). Return the
+    resolved file path."""
+    p = ckpt.expanduser().resolve()
+    if p.is_file():
+        return p
+    if p.is_dir():
+        cand = p / "pytorch_model.bin"
+        if cand.exists():
+            return cand
+        sub = sorted(p.glob("checkpoint-*"),
+                     key=lambda d: int(d.name.split("-")[-1])
+                     if d.name.split("-")[-1].isdigit() else -1)
+        if sub:
+            cand = sub[-1] / "pytorch_model.bin"
+            if cand.exists():
+                return cand
+    raise SystemExit(f"could not resolve doc2lora ckpt at {ckpt}; "
+                     f"expected a pytorch_model.bin or a checkpoint dir.")
+
+
+def _load_doc2lora_bundle(ckpt: Path, drc_cache_dir: Path,
+                          max_ctx_tokens: int, device: torch.device,
+                          dtype: torch.dtype):
+    """Build (tokenizer, ModulatedPretrainedModel) for the D2L baseline,
+    plus a context tokenizer and the per-commit DRC cache directory
+    stashed on the model for later use by ``score_suite``.
+    """
+    # Local imports -- only the doc2lora method needs them.
+    from ctx_to_lora.model_loading import get_tokenizer as _get_tok
+    from ctx_to_lora.modeling.hypernet import (
+        ModulatedPretrainedModel as _ModulatedPretrainedModel,
+    )
+
+    ckpt_path = _resolve_doc2lora_ckpt(ckpt)
+    drc_cache_dir = drc_cache_dir.expanduser().resolve()
+    print(f"[load] Doc2LoRA: ckpt={ckpt_path}", flush=True)
+    print(f"[load]           drc_cache_dir={drc_cache_dir}", flush=True)
+    print(f"[load]           max_ctx_tokens={max_ctx_tokens}", flush=True)
+
+    state_dict = torch.load(str(ckpt_path), map_location=device,
+                            weights_only=False)
+    model = _ModulatedPretrainedModel.from_state_dict(
+        state_dict, train=False, use_sequence_packing=False,
+    )
+    model.eval()
+    model.to(device)
+
+    base_name = model.base_model.config.name_or_path
+    tokenizer = _get_tok(base_name)
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token_id = tokenizer.eos_token_id
+
+    ctx_name = model.ctx_encoder_args.ctx_encoder_model_name_or_path
+    if ctx_name is None:
+        ctx_name = base_name
+    ctx_tokenizer = _get_tok(ctx_name)
+
+    print(f"[load]           base_model={base_name}", flush=True)
+    print(f"[load]           ctx_encoder={ctx_name}", flush=True)
+
+    for p in model.parameters():
+        p.requires_grad = False
+    return tokenizer, model, ctx_tokenizer
+
+
+def _d2l_build_commit_doc(contexts: Dict[str, Dict[str, Any]],
+                          ctx_tokenizer, max_ctx_tokens: int) -> str:
+    """Concatenate unique ``extracted_code`` snippets from this commit's
+    DRC cache into a single document string and truncate to
+    ``max_ctx_tokens`` via the context encoder's tokenizer. Mirrors the
+    document-construction logic used by
+    ``baselines/doc2lora/generate_teacher_logprobs_v2.py`` so train and
+    eval see the same per-commit doc shape.
+    """
+    snippets: List[str] = []
+    seen: set = set()
+    for v in contexts.values():
+        if not isinstance(v, dict):
+            continue
+        code = v.get("extracted_code") or ""
+        if not code or code in seen:
+            continue
+        seen.add(code)
+        snippets.append(code)
+    snippets.sort()
+    doc_text = "\n\n".join(snippets)
+    if not doc_text:
+        return ""
+    ids = ctx_tokenizer.encode(doc_text, add_special_tokens=False)
+    if len(ids) > max_ctx_tokens:
+        ids = ids[:max_ctx_tokens]
+        doc_text = ctx_tokenizer.decode(ids, skip_special_tokens=True)
+    return doc_text
+
+
+@torch.no_grad()
+def _doc2lora_internalize_commit(model, drc_cache_dir: Path, repo_id: str,
+                                 commit_sha: str, ctx_tokenizer,
+                                 max_ctx_tokens: int) -> bool:
+    """Load this commit's DRC, build the doc, ``model.reset() + internalize``.
+    Returns True on success, False if no DRC text was found (caller will
+    keep the previous-commit LoRA or fall back to the base model)."""
+    contexts = _load_drc_commit_contexts(drc_cache_dir, repo_id, commit_sha)
+    if not contexts:
+        return False
+    doc_text = _d2l_build_commit_doc(contexts, ctx_tokenizer, max_ctx_tokens)
+    if not doc_text:
+        return False
+    model.reset()
+    model.internalize(doc_text)
+    return True
+
+
+@torch.no_grad()
+def _text2lora_inject_repo(model, hypermod, layer_indices, code_embs,
+                           repo_id: str, device: torch.device) -> bool:
+    """Generate this repo's LoRA from its code embedding and apply it
+    in-place to ``model``. Returns ``True`` if a repo-specific adapter
+    was installed, ``False`` if no embedding was found (caller can fall
+    back to a zero-LoRA baseline)."""
+    from peft.utils import set_peft_model_state_dict as _set_peft_sd
+
+    slug = _slug_repo(repo_id)
+    emb = code_embs.get(slug)
+    if emb is None:
+        return False
+    task_emb = emb.to(device=device, dtype=torch.float32)
+    if task_emb.dim() == 1:
+        task_emb = task_emb.unsqueeze(0)
+    encoder_out = hypermod.task_encoder(task_emb)
+    encoded = encoder_out["encoded_task_emb"].detach()
+    lora_sd = hypermod.gen_lora(layer_indices, encoded)
+    _set_peft_sd(model, lora_sd)
+    return True
+
+
 def load_model_for_method(method: str, base_model_name: str, ckpt: Optional[Path],
                           device: torch.device,
-                          dtype: torch.dtype = torch.bfloat16):
-    """Return (tokenizer, model) ready for inference, all params frozen."""
-    if method == "fft":
+                          dtype: torch.dtype = torch.bfloat16,
+                          *,
+                          text2lora_hypermod_dir: Optional[Path] = None,
+                          text2lora_code_emb_path: Optional[Path] = None,
+                          text2lora_dir: Optional[Path] = None,
+                          doc2lora_ckpt: Optional[Path] = None,
+                          doc2lora_drc_cache_dir: Optional[Path] = None,
+                          doc2lora_max_ctx_tokens: int = 4096):
+    """Return (tokenizer, model[, extras]) ready for inference, all params frozen.
+
+    ``rag`` and ``drc`` use the pretrained backbone with no adapter -- only
+    the *input* changes (retrieved chunks or DRC-extracted code is prepended
+    to the prefix). ``--ckpt`` is ignored for those methods.
+
+    For ``text2lora`` we additionally stash the hypermod, ``layer_indices``,
+    and ``code_embs`` dict as private attributes on the returned model so
+    ``score_suite`` can call ``hypermod.gen_lora`` per-repo without a
+    second loader-style API.
+
+    For ``doc2lora`` we stash ``_d2l_drc_cache_dir``, ``_d2l_max_ctx_tokens``,
+    ``_d2l_ctx_tokenizer`` on the ``ModulatedPretrainedModel`` so the
+    score loop can call ``model.reset() + internalize(per-commit-DRC)``
+    once per (repo, commit_sha) group.
+    """
+    if method == "doc2lora":
+        if doc2lora_ckpt is None or doc2lora_drc_cache_dir is None:
+            raise SystemExit("--doc2lora-ckpt and --doc2lora-drc-cache-dir "
+                             "are required for --method doc2lora")
+        tok, model, ctx_tokenizer = _load_doc2lora_bundle(
+            doc2lora_ckpt, doc2lora_drc_cache_dir,
+            int(doc2lora_max_ctx_tokens), device=device, dtype=dtype,
+        )
+        model._d2l_mode = True
+        model._d2l_drc_cache_dir = doc2lora_drc_cache_dir.expanduser().resolve()
+        model._d2l_max_ctx_tokens = int(doc2lora_max_ctx_tokens)
+        model._d2l_ctx_tokenizer = ctx_tokenizer
+        return tok, model
+
+    if method == "text2lora":
+        if text2lora_hypermod_dir is None or text2lora_code_emb_path is None:
+            raise SystemExit("--text2lora-hypermod-dir and "
+                             "--text2lora-code-emb-path are required for "
+                             "--method text2lora")
+        if text2lora_dir is None:
+            text2lora_dir = Path(_ROOT) / "text2lora"
+        tok, model, hypermod, layer_indices, code_embs = _load_text2lora_bundle(
+            text2lora_hypermod_dir, text2lora_dir, text2lora_code_emb_path,
+            device=device, dtype=dtype,
+        )
+        # Stash text2lora state on the model so score_suite can pick it up.
+        model._t2l_hypermod = hypermod
+        model._t2l_layer_indices = layer_indices
+        model._t2l_code_embs = code_embs
+        model._t2l_device = device
+        return tok, model
+
+    # ``rag`` and ``drc`` use the pretrained backbone with no adapter --
+    # only the *input* changes (retrieved chunks or DRC-extracted code is
+    # prepended to the prefix). Fall through to the pretrained loader.
+    load_method = "pretrained" if method in ("rag", "drc") else method
+    if load_method == "fft":
         if ckpt is None:
             raise SystemExit("--ckpt is required for method=fft")
         print(f"[load] FFT -> AutoModelForCausalLM.from_pretrained({ckpt})",
@@ -93,7 +433,7 @@ def load_model_for_method(method: str, base_model_name: str, ckpt: Optional[Path
             attn_implementation="flash_attention_2",
             device_map={"": device},
         )
-    elif method == "slora":
+    elif load_method == "slora":
         if ckpt is None:
             raise SystemExit("--ckpt is required for method=slora")
         try:
@@ -161,7 +501,13 @@ def _get_bos_id(tok) -> Optional[int]:
 @torch.no_grad()
 def _generate_batch(model, tokenizer, device, input_ids_list: List[List[int]],
                     max_new_tokens: int) -> List[str]:
-    """Left-pad a batch, generate, decode only the new tokens per sample."""
+    """Left-pad a batch, generate, decode only the new tokens per sample.
+
+    For Doc-to-LoRA's ``ModulatedPretrainedModel`` we route through
+    ``model.base_model.generate`` because the outer model wraps the base
+    with its own ``.generate`` API (which expects context tokens, not
+    plain text inputs).
+    """
     L = max(len(x) for x in input_ids_list)
     pad_id = tokenizer.pad_token_id or 0
     bs = len(input_ids_list)
@@ -173,7 +519,10 @@ def _generate_batch(model, tokenizer, device, input_ids_list: List[List[int]],
         input_ids[i, L - n:] = torch.tensor(ids, dtype=torch.long, device=device)
         attn[i, L - n:] = 1
         lens.append(n)
-    out = model.generate(
+    gen_target = (model.base_model
+                  if getattr(model, "_d2l_mode", False)
+                  else model)
+    out = gen_target.generate(
         input_ids=input_ids,
         attention_mask=attn,
         max_new_tokens=int(max_new_tokens),
@@ -188,6 +537,108 @@ def _generate_batch(model, tokenizer, device, input_ids_list: List[List[int]],
         gen = out[i, L:].tolist()
         decoded.append(tokenizer.decode(gen, skip_special_tokens=True))
     return decoded
+
+
+# ---------------------------------------------------------------------------
+# RAG: per-commit chunk index loader + retrieval
+# ---------------------------------------------------------------------------
+
+def _rag_cache_path(cache_dir: Path, repo_id: str, sha: str) -> Path:
+    safe = repo_id.replace("/", "__")
+    return cache_dir / f"{safe}__{sha}.pt"
+
+
+def _load_rag_commit_index(cache_dir: Path, repo_id: str,
+                           sha: str) -> Dict[str, Any]:
+    """Return ``{"chunks": [...], "embeddings": float32[N, D] | None}``.
+    Missing/empty cache => no retrieval; the QnA falls back to plain prefix."""
+    path = _rag_cache_path(cache_dir, repo_id, sha)
+    if not path.exists():
+        return {"chunks": [], "embeddings": None}
+    try:
+        data = torch.load(path, map_location="cpu", weights_only=False)
+    except Exception as e:
+        print(f"  [rag] failed to load {path}: {type(e).__name__}: {e}",
+              flush=True)
+        return {"chunks": [], "embeddings": None}
+    embs = data.get("embeddings")
+    if embs is not None and not isinstance(embs, torch.Tensor):
+        embs = torch.as_tensor(embs)
+    if embs is not None:
+        embs = embs.float()
+    return {"chunks": list(data.get("chunks") or []), "embeddings": embs}
+
+
+@torch.inference_mode()
+def _embed_rag_queries(texts: List[str], embed_model, embed_tokenizer,
+                       device, max_length: int = 512) -> torch.Tensor:
+    """Attention-mean pooled, L2-normalised query embeddings (CPU)."""
+    enc = embed_tokenizer(
+        texts, padding=True, truncation=True, max_length=max_length,
+        return_tensors="pt",
+    )
+    enc = {k: v.to(device) for k, v in enc.items()}
+    out = embed_model(**enc)
+    mask = enc["attention_mask"].unsqueeze(-1)
+    pooled = (out.last_hidden_state * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
+    pooled = torch.nn.functional.normalize(pooled.float(), p=2, dim=-1)
+    return pooled.cpu()
+
+
+def _rag_retrieve_topk(query_emb: torch.Tensor, index: Dict[str, Any],
+                       top_k: int) -> List[str]:
+    if not index["chunks"] or index["embeddings"] is None:
+        return []
+    embs = index["embeddings"]
+    sims = (query_emb @ embs.T).squeeze(0)
+    k = min(top_k, len(index["chunks"]))
+    _, top_idx = sims.topk(k)
+    return [index["chunks"][i] for i in top_idx.tolist()]
+
+
+def _format_rag_prompt(prefix: str, retrieved_chunks: List[str]) -> str:
+    """Plain code-completion prompt: retrieved chunks then prefix."""
+    if not retrieved_chunks:
+        return prefix
+    return "\n\n\n".join(retrieved_chunks) + "\n\n\n" + prefix
+
+
+# ---------------------------------------------------------------------------
+# DRC: per-commit context loader
+# ---------------------------------------------------------------------------
+
+def _drc_cache_path(cache_dir: Path, repo_id: str, sha: str) -> Path:
+    safe = repo_id.replace("/", "__")
+    return cache_dir / f"{safe}__{sha}.json"
+
+
+def _load_drc_commit_contexts(cache_dir: Path, repo_id: str,
+                              sha: str) -> Dict[str, Dict[str, Any]]:
+    """Return the per-(test_file, lineno, col_offset)-keyed context map for
+    this commit, or {} if missing."""
+    path = _drc_cache_path(cache_dir, repo_id, sha)
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"  [drc] failed to load {path}: {type(e).__name__}: {e}",
+              flush=True)
+        return {}
+    return data.get("contexts") or {}
+
+
+def _drc_key_for_qna(q: Dict[str, Any]) -> str:
+    if q.get("assertion_event_id"):
+        return q["assertion_event_id"]
+    return f"{q.get('test_file', '')}::{int(q.get('lineno', 0))}" \
+           f"::{int(q.get('col_offset', 0))}"
+
+
+def _format_drc_prompt(prefix: str, drc_code: str) -> str:
+    if not drc_code:
+        return prefix
+    return drc_code + "\n\n\n" + prefix
 
 
 def score_suite(
@@ -206,6 +657,21 @@ def score_suite(
     bootstrap: int = 5000,
     shard_i: int = 0,
     num_shards: int = 1,
+    # ---- Prefix-length cap (ablation) ------------------------------------
+    # When > 0, each QnA's prefix is left-truncated to its last N tokens
+    # **before** any RAG query / DRC compression / prompt assembly. Set to
+    # ~256 to reproduce the static-snapshot prefix budget on the
+    # commit-derived suites; default 0 keeps the QnA's native prefix.
+    prefix_max_tokens: int = 0,
+    # ---- Context-injection options (rag / drc) ---------------------------
+    context_method: str = "none",   # "none" | "rag" | "drc"
+    rag_cache_dir: Optional[Path] = None,
+    rag_top_k: int = 3,
+    rag_embed_model=None,
+    rag_embed_tokenizer=None,
+    rag_query_chars: int = 2000,
+    drc_cache_dir: Optional[Path] = None,
+    drc_max_tokens: int = 4096,
 ) -> Dict[str, Any]:
     """Walk one v2 QnA parquet, group by (repo, commit), generate, score.
 
@@ -228,7 +694,14 @@ def score_suite(
         key = (qr.repo_id, qr.commit_sha)
         g = groups[key]
         g["commit_index"] = int(qr.commit_index)
-        g["pairs"].append({"prefix": qr.prefix, "target": qr.target})
+        g["pairs"].append({
+            "prefix": qr.prefix,
+            "target": qr.target,
+            "test_file": qr.test_file,
+            "lineno": int(qr.lineno),
+            "col_offset": int(qr.col_offset),
+            "assertion_event_id": qr.assertion_event_id,
+        })
     print(f"[suite {suite_name}] {len(rows):,} qnas across "
           f"{len(groups):,} (repo, commit) groups", flush=True)
 
@@ -288,6 +761,14 @@ def score_suite(
     t0 = time.time()
     n_done = len(done_keys)
     n_done_in_run = 0
+    # Text2LoRA: re-inject the per-repo LoRA only when the repo changes.
+    current_t2l_repo: Optional[str] = None
+    t2l_state = getattr(model, "_t2l_hypermod", None)
+    t2l_missing_repos: set = set()
+    # Doc-to-LoRA: re-internalize the per-commit DRC at every new commit.
+    d2l_mode = bool(getattr(model, "_d2l_mode", False))
+    d2l_missing_commits: int = 0
+    d2l_internalized_commits: int = 0
     for (repo_id, commit_sha) in group_keys:
         if (repo_id, commit_sha) in done_keys:
             continue
@@ -295,13 +776,101 @@ def score_suite(
         pairs = g["pairs"]
         if qnas_per_commit_limit and len(pairs) > qnas_per_commit_limit:
             pairs = pairs[:qnas_per_commit_limit]
+
+        # ---- Optional prefix-length cap (matches static-snapshot budget) -
+        # Re-truncate each QnA's prefix to its last N tokens **before**
+        # RAG query, DRC compression, and prompt assembly run -- so all
+        # downstream stages see the same shortened prefix the static-suite
+        # baseline saw at the corresponding step.
+        if prefix_max_tokens and prefix_max_tokens > 0:
+            for p in pairs:
+                ids = tokenizer.encode(p["prefix"], add_special_tokens=False)
+                if len(ids) > prefix_max_tokens:
+                    ids = ids[-prefix_max_tokens:]
+                    p["prefix"] = tokenizer.decode(ids, skip_special_tokens=True)
+
+        # ---- Text2LoRA: regenerate the LoRA adapter when the repo changes
+        if t2l_state is not None and repo_id != current_t2l_repo:
+            ok = _text2lora_inject_repo(
+                model,
+                model._t2l_hypermod,
+                model._t2l_layer_indices,
+                model._t2l_code_embs,
+                repo_id,
+                model._t2l_device,
+            )
+            if not ok and repo_id not in t2l_missing_repos:
+                t2l_missing_repos.add(repo_id)
+                print(f"  [text2lora] WARN: no code embedding for "
+                      f"{repo_id}; falling back to last loaded LoRA "
+                      f"(or pretrained for the first repo).", flush=True)
+            current_t2l_repo = repo_id
+
+        # ---- Doc-to-LoRA: re-internalize this commit's DRC document.
+        if d2l_mode:
+            ok = _doc2lora_internalize_commit(
+                model,
+                model._d2l_drc_cache_dir,
+                repo_id,
+                commit_sha,
+                model._d2l_ctx_tokenizer,
+                model._d2l_max_ctx_tokens,
+            )
+            if ok:
+                d2l_internalized_commits += 1
+            else:
+                d2l_missing_commits += 1
+                # No DRC -> revert to un-adapted base model for this commit
+                # to avoid bleeding the previous commit's LoRA across.
+                model.reset()
+
+        # ---- Lazy per-commit context loads (RAG and/or DRC) -------------
+        rag_index: Optional[Dict[str, Any]] = None
+        drc_contexts: Optional[Dict[str, Dict[str, Any]]] = None
+        if context_method == "rag":
+            assert rag_cache_dir is not None
+            rag_index = _load_rag_commit_index(rag_cache_dir, repo_id, commit_sha)
+        elif context_method == "drc":
+            assert drc_cache_dir is not None
+            drc_contexts = _load_drc_commit_contexts(drc_cache_dir, repo_id, commit_sha)
+        # Lazy import: only needed for DRC (and only when there's something
+        # to compress).
+        if context_method == "drc":
+            from evaluation.compress_context import compress_oracle_context  # noqa: E402
+
+        # ---- Build (per-QnA) augmented prompts -------------------------
+        prompts: List[str] = []
+        if context_method == "rag" and rag_index and rag_index["chunks"]:
+            queries = [p["prefix"][-rag_query_chars:] for p in pairs]
+            q_embs = _embed_rag_queries(
+                queries, rag_embed_model, rag_embed_tokenizer, device,
+            )
+            for p, qe in zip(pairs, q_embs):
+                chunks = _rag_retrieve_topk(qe.unsqueeze(0), rag_index, rag_top_k)
+                prompts.append(_format_rag_prompt(p["prefix"], chunks))
+        elif context_method == "drc" and drc_contexts:
+            for p in pairs:
+                ctx = drc_contexts.get(_drc_key_for_qna(p), {})
+                raw_code = ctx.get("extracted_code", "") if isinstance(ctx, dict) else ""
+                if raw_code:
+                    compressed = compress_oracle_context(
+                        raw_code, p["prefix"], tokenizer,
+                        max_tokens=drc_max_tokens,
+                    )
+                else:
+                    compressed = ""
+                prompts.append(_format_drc_prompt(p["prefix"], compressed))
+        else:
+            prompts = [p["prefix"] for p in pairs]
+
         commit_samples: List[Tuple[float, float, float]] = []
         for i in range(0, len(pairs), batch_size):
             batch_pairs = pairs[i:i + batch_size]
+            batch_prompts = prompts[i:i + batch_size]
             inputs = [
-                _prepare_prefix_ids(tokenizer, p["prefix"],
+                _prepare_prefix_ids(tokenizer, prompt,
                                     max_input_tokens, bos_id)
-                for p in batch_pairs
+                for prompt in batch_prompts
             ]
             preds = _generate_batch(
                 model, tokenizer, device, inputs,
@@ -443,7 +1012,9 @@ def _write_suite_json(out_path: Path, suite_name: str,
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--method", required=True, choices=["pretrained", "fft", "slora"])
+    ap.add_argument("--method", required=True,
+                    choices=["pretrained", "fft", "slora", "rag", "drc",
+                             "text2lora", "doc2lora"])
     ap.add_argument("--ckpt", type=str, default=None,
                     help="Path to FFT checkpoint dir (method=fft) or "
                          "SLoRA adapter dir (method=slora). Unused for pretrained.")
@@ -460,6 +1031,13 @@ def main() -> None:
     ap.add_argument("--max-input-tokens", type=int, default=4096,
                     help="Left-truncate prefix to keep last N tokens; matches "
                          "v2 Code2LoRA trainers' --max-seq-len (minus target budget).")
+    ap.add_argument("--prefix-max-tokens", type=int, default=0,
+                    help="If >0, left-truncate each QnA's prefix to its last N "
+                         "tokens BEFORE any RAG query / DRC compression / prompt "
+                         "assembly. Used to reproduce the static-snapshot "
+                         "prefix budget (median 224 tok) on commit-derived "
+                         "suites so RAG / DRC don't have to compete with a "
+                         "much longer prefix for the 4K window. 0 = disabled.")
     ap.add_argument("--max-new-tokens", type=int, default=64)
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--repo-limit", type=int, default=0,
@@ -473,11 +1051,69 @@ def main() -> None:
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--shard-i", type=int, default=0,
                     help="0-indexed shard ID; with --num-shards > 1 only "
-                         "score repos whose sorted-index % num_shards == shard_i.")
+                         "score repos whose sorted-index mod num_shards == shard_i.")
     ap.add_argument("--num-shards", type=int, default=1,
                     help="Total number of shards. Use SLURM job arrays to "
                          "fan out across GPUs; results land in suffixed "
                          "JSONs that merge_eval_shards.py recombines.")
+
+    # ---- RAG ------------------------------------------------------------
+    ap.add_argument("--rag-cache-dir", type=str, default=None,
+                    help="Directory with per-(repo, sha) chunk indices "
+                         "(.pt) built by "
+                         "evaluation/build_rag_cache_per_commit.py. "
+                         "Required for --method rag.")
+    ap.add_argument("--rag-top-k", type=int, default=3,
+                    help="Number of chunks to prepend per QnA.")
+    ap.add_argument("--rag-embed-model-name",
+                    default="Qwen/Qwen3-Embedding-0.6B",
+                    help="Embedder used to embed the per-QnA query for "
+                         "retrieval against the per-commit chunk index.")
+    ap.add_argument("--rag-query-chars", type=int, default=2000,
+                    help="Length of the prefix tail used as the retrieval "
+                         "query (matches baselines/rag/test_rag.py).")
+
+    # ---- DRC ------------------------------------------------------------
+    ap.add_argument("--drc-cache-dir", type=str, default=None,
+                    help="Directory with per-(repo, sha) DRC context JSONs "
+                         "built by "
+                         "evaluation/build_drc_cache_per_commit.py. "
+                         "Required for --method drc.")
+    ap.add_argument("--drc-max-tokens", type=int, default=4096,
+                    help="Adaptive-budget cap for the prepended DRC context "
+                         "(see evaluation/compress_context.py).")
+
+    # ---- Text2LoRA (Code-SFT v2) ----------------------------------------
+    ap.add_argument("--text2lora-hypermod-dir", type=str, default=None,
+                    help="Run dir produced by "
+                         "baselines/text2lora/train_code_sft.py. Must "
+                         "contain hypermod.pt, args.yaml, and "
+                         "adapter_config.json. Required for --method "
+                         "text2lora.")
+    ap.add_argument("--text2lora-code-emb-path", type=str, default=None,
+                    help="Path to code_embeddings_v2.pt produced by "
+                         "baselines/text2lora/extract_code_embeddings_v2.py. "
+                         "Required for --method text2lora.")
+    ap.add_argument("--text2lora-dir", type=str, default=None,
+                    help="text2lora/ project root (used for chat-template "
+                         "path resolution). Defaults to the repo's "
+                         "text2lora/ directory.")
+
+    # ---- Doc-to-LoRA (Sakana D2L) --------------------------------------
+    ap.add_argument("--doc2lora-ckpt", type=str, default=None,
+                    help="Path to a Doc2LoRA checkpoint (pytorch_model.bin), "
+                         "a checkpoint-XXXX dir, or a run-dir containing "
+                         "checkpoint-* sub-dirs. Required for --method "
+                         "doc2lora.")
+    ap.add_argument("--doc2lora-drc-cache-dir", type=str, default=None,
+                    help="Per-(repo, commit) DRC context cache (the same "
+                         "dir the drc baseline uses). Required for "
+                         "--method doc2lora.")
+    ap.add_argument("--doc2lora-max-ctx-tokens", type=int, default=4096,
+                    help="Truncate the per-commit DRC document to this "
+                         "many tokens before internalization (matches "
+                         "max_packed_ctx_len at training time).")
+
     args = ap.parse_args()
 
     device = torch.device(args.device if (args.device != "cuda" or torch.cuda.is_available()) else "cpu")
@@ -487,7 +1123,44 @@ def main() -> None:
 
     tok, model = load_model_for_method(
         args.method, args.base_model, ckpt, device=device,
+        text2lora_hypermod_dir=(Path(args.text2lora_hypermod_dir)
+                                if args.text2lora_hypermod_dir else None),
+        text2lora_code_emb_path=(Path(args.text2lora_code_emb_path)
+                                 if args.text2lora_code_emb_path else None),
+        text2lora_dir=(Path(args.text2lora_dir) if args.text2lora_dir else None),
+        doc2lora_ckpt=(Path(args.doc2lora_ckpt)
+                       if args.doc2lora_ckpt else None),
+        doc2lora_drc_cache_dir=(Path(args.doc2lora_drc_cache_dir)
+                                if args.doc2lora_drc_cache_dir else None),
+        doc2lora_max_ctx_tokens=int(args.doc2lora_max_ctx_tokens),
     )
+
+    # Optional: load the retrieval embedder once (used for --method rag).
+    rag_embed_model = None
+    rag_embed_tokenizer = None
+    rag_cache_dir = None
+    drc_cache_dir = None
+    if args.method == "rag":
+        if not args.rag_cache_dir:
+            raise SystemExit("--rag-cache-dir is required for --method rag")
+        rag_cache_dir = Path(args.rag_cache_dir).expanduser().resolve()
+        if not rag_cache_dir.exists():
+            raise SystemExit(f"RAG cache dir not found: {rag_cache_dir}")
+        from transformers import AutoModel, AutoTokenizer
+        print(f"[load] RAG query-embedder: {args.rag_embed_model_name}",
+              flush=True)
+        rag_embed_tokenizer = AutoTokenizer.from_pretrained(
+            args.rag_embed_model_name, use_fast=True,
+        )
+        rag_embed_model = AutoModel.from_pretrained(
+            args.rag_embed_model_name, torch_dtype=torch.bfloat16,
+        ).to(device).eval()
+    elif args.method == "drc":
+        if not args.drc_cache_dir:
+            raise SystemExit("--drc-cache-dir is required for --method drc")
+        drc_cache_dir = Path(args.drc_cache_dir).expanduser().resolve()
+        if not drc_cache_dir.exists():
+            raise SystemExit(f"DRC cache dir not found: {drc_cache_dir}")
 
     shard_suffix = (f"_shard{args.shard_i}of{args.num_shards}"
                     if args.num_shards > 1 else "")
@@ -511,6 +1184,14 @@ def main() -> None:
             bootstrap=args.bootstrap,
             shard_i=args.shard_i,
             num_shards=args.num_shards,
+            prefix_max_tokens=args.prefix_max_tokens,
+            # Context injection
+            context_method=args.method if args.method in ("rag", "drc") else "none",
+            rag_cache_dir=rag_cache_dir, rag_top_k=args.rag_top_k,
+            rag_embed_model=rag_embed_model,
+            rag_embed_tokenizer=rag_embed_tokenizer,
+            rag_query_chars=args.rag_query_chars,
+            drc_cache_dir=drc_cache_dir, drc_max_tokens=args.drc_max_tokens,
         )
         suite_summaries[suite] = s
 

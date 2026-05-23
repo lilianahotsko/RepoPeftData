@@ -157,6 +157,10 @@ def main():
     ap.add_argument("--max-seq-length", type=int, default=2048)
     ap.add_argument("--rank", type=int, default=64)
     ap.add_argument("--lora-alpha", type=int, default=128)
+    ap.add_argument("--lora-dropout", type=float, default=0.0,
+                    help="LoRA dropout (regularization that often helps when train loss "
+                         "decouples from val loss after epoch 1).")
+    ap.add_argument("--warmup-ratio", type=float, default=0.05)
     ap.add_argument("--val-split", type=str, default="cr_val")
     ap.add_argument("--use-oracle", action="store_true",
                     help="Prepend oracle context to prefixes")
@@ -236,7 +240,7 @@ def main():
     lora_config = LoraConfig(
         r=args.rank,
         lora_alpha=args.lora_alpha,
-        lora_dropout=0.0,
+        lora_dropout=args.lora_dropout,
         bias="none",
         task_type="CAUSAL_LM",
         target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
@@ -258,7 +262,7 @@ def main():
         gradient_accumulation_steps=args.grad_accum,
         learning_rate=args.lr,
         lr_scheduler_type="cosine",
-        warmup_ratio=0.05,
+        warmup_ratio=args.warmup_ratio,
         bf16=True,
         gradient_checkpointing=True,
         logging_steps=20,
