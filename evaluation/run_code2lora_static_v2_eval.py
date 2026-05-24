@@ -471,7 +471,8 @@ def main() -> None:
     ap.add_argument("--base-model", default=DEFAULT_BASE_MODEL)
     ap.add_argument("--target-modules", nargs="+", default=DEFAULT_TARGET_MODULES)
     ap.add_argument("--suite", required=True,
-                    choices=["ir_val", "ir_test", "cr_val", "cr_test"])
+                    choices=["ir_val", "ir_test", "cr_val", "cr_test",
+                             "ood_test"])
     ap.add_argument("--output-dir", required=True)
 
     ap.add_argument("--max-input-tokens", type=int, default=4096)
@@ -497,10 +498,15 @@ def main() -> None:
         device=device,
     )
 
-    in_repo_splits = (
-        None if args.suite.startswith("cr_")
-        else (["val"] if args.suite == "ir_val" else ["test"])
-    )
+    if args.suite == "ood_test":
+        # Score every (repo, commit) row in the OOD bank regardless of its
+        # in_repo split label -- matches the GRU OOD eval which spans the
+        # full 1,950-commit / 92-repo OOD set.
+        in_repo_splits = None
+    elif args.suite.startswith("cr_"):
+        in_repo_splits = None
+    else:
+        in_repo_splits = ["val"] if args.suite == "ir_val" else ["test"]
 
     snapshots_parquet = Path(args.snapshots_dir) / "commits" / f"{args.suite}.parquet"
     qna_parquet = Path(args.snapshots_dir) / "qna" / f"{args.suite}.parquet"

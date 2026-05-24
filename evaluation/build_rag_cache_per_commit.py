@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Build per-``(repo_id, commit_sha)`` RAG chunk indices for the v2
-commit-derived QnA dataset.
+"""Build per-``(repo_id, commit_sha)`` RAG chunk indices for the v2 QnA dataset.
 
 For every unique commit referenced by the v2 QnA parquets we read the
 **state of the repository at that commit** via ``git ls-tree`` and
 ``git show`` (no checkout / no worktree -- avoids polluting the clones).
-Each ``.py`` non-test file is tokenized with Qwen3-Embedding-0.6B,
-chunked into 512-token windows with 64-token overlap (matching
-``baselines/rag/build_indices.py``), embedded, L2-normalized, and saved
-to ``$RAG_COMMIT_CACHE_DIR/<author>__<repo>__<sha>.pt``.
+
+Default ``--chunk-mode ast`` (WeChat-style): one corpus unit per top-level
+Python function or class, BM25 token lists stored alongside dense
+Qwen3-Embedding vectors for hybrid retrieval at eval time.
+
+Legacy ``--chunk-mode token`` keeps 512-token sliding windows with 64-token
+overlap (``baselines/rag/build_indices.py``).
 
 This is the per-commit analogue of ``baselines/rag/build_indices.py``,
 which only builds one index per repo at HEAD.
@@ -39,12 +41,16 @@ from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
 import torch
-import torch.nn.functional as F
-
 
 _ROOT = Path(__file__).resolve().parents[1]
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
+
+from evaluation.rag_corpus import (
+    build_index_payload,
+    embed_texts_mean_pool,
+    extract_ast_chunks,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -110,10 +116,6 @@ def _git_show_blob(repo_dir: Path, sha: str, path: str,
         return None
 
 
-# ---------------------------------------------------------------------------
-# Chunking (lifted from baselines/rag/build_indices.py: 512/64).
-# ---------------------------------------------------------------------------
-
 def _chunk_token_ids(token_ids: List[int], chunk_tokens: int,
                      overlap: int) -> List[List[int]]:
     if chunk_tokens <= 0 or overlap >= chunk_tokens:
@@ -131,30 +133,6 @@ def _chunk_token_ids(token_ids: List[int], chunk_tokens: int,
     return out
 
 
-# ---------------------------------------------------------------------------
-# Embedding loop
-# ---------------------------------------------------------------------------
-
-@torch.inference_mode()
-def _embed_texts(model, tokenizer, texts: List[str], device: str,
-                 batch_size: int = 32, max_length: int = 512) -> torch.Tensor:
-    """Attention-mean pooled embeddings, returned on CPU as float32."""
-    if not texts:
-        return torch.empty(0)
-    out_chunks = []
-    for i in range(0, len(texts), batch_size):
-        enc = tokenizer(
-            texts[i:i + batch_size], padding=True, truncation=True,
-            max_length=max_length, return_tensors="pt",
-        )
-        enc = {k: v.to(device) for k, v in enc.items()}
-        out = model(**enc)
-        mask = enc["attention_mask"].unsqueeze(-1)
-        pooled = (out.last_hidden_state * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
-        out_chunks.append(pooled.float().cpu())
-    return torch.cat(out_chunks, dim=0)
-
-
 def _build_one_commit_index(
     *,
     repo_dir: Path,
@@ -167,6 +145,7 @@ def _build_one_commit_index(
     overlap: int,
     max_chunks: int,
     batch_size: int,
+    chunk_mode: str = "ast",
 ) -> Dict[str, object]:
     """Walk the tree at *sha*, chunk and embed non-test ``.py`` files."""
     paths = _git_ls_tree(repo_dir, sha)
@@ -178,45 +157,43 @@ def _build_one_commit_index(
         text = _git_show_blob(repo_dir, sha, rel)
         if not text:
             continue
-        ids = embed_tokenizer.encode(text, add_special_tokens=False)
-        windows = _chunk_token_ids(ids, chunk_tokens=chunk_tokens, overlap=overlap)
-        for w in windows:
-            if not w:
-                continue
-            chunk_text = embed_tokenizer.decode(w, skip_special_tokens=True)
-            all_chunks.append(f"# File: {rel}\n{chunk_text}")
-            if len(all_chunks) >= max_chunks:
-                break
-        if len(all_chunks) >= max_chunks:
+        if chunk_mode == "ast":
+            for rec in extract_ast_chunks(rel, text):
+                all_chunks.append(rec["text"])
+                if max_chunks and len(all_chunks) >= max_chunks:
+                    break
+        else:
+            ids = embed_tokenizer.encode(text, add_special_tokens=False)
+            windows = _chunk_token_ids(ids, chunk_tokens=chunk_tokens, overlap=overlap)
+            for w in windows:
+                if not w:
+                    continue
+                chunk_text = embed_tokenizer.decode(w, skip_special_tokens=True)
+                all_chunks.append(f"# File: {rel}\n{chunk_text}")
+                if max_chunks and len(all_chunks) >= max_chunks:
+                    break
+        if max_chunks and len(all_chunks) >= max_chunks:
             break
 
-    if not all_chunks:
-        return {
-            "chunks": [],
-            "embeddings": None,
-            "repo": repo_id,
-            "commit_sha": sha,
-            "chunk_tokens": chunk_tokens,
-            "overlap": overlap,
-            "max_chunks": max_chunks,
-            "n_py_files_in_tree": len(py_paths),
-        }
-
-    embs = _embed_texts(
-        embed_model, embed_tokenizer, all_chunks, device=device,
-        batch_size=batch_size, max_length=chunk_tokens,
-    )
-    embs = F.normalize(embs, p=2, dim=-1).to(torch.float16)
-    return {
-        "chunks": all_chunks,
-        "embeddings": embs,
+    meta = {
         "repo": repo_id,
         "commit_sha": sha,
+        "chunk_mode": chunk_mode,
         "chunk_tokens": chunk_tokens,
         "overlap": overlap,
         "max_chunks": max_chunks,
         "n_py_files_in_tree": len(py_paths),
     }
+    if not all_chunks:
+        return build_index_payload([], torch.empty(0), repo_id=repo_id,
+                                   commit_sha=sha, extra=meta)
+
+    embs = embed_texts_mean_pool(
+        embed_model, embed_tokenizer, all_chunks, device,
+        batch_size=batch_size, max_length=chunk_tokens,
+    )
+    return build_index_payload(all_chunks, embs, repo_id=repo_id,
+                               commit_sha=sha, extra=meta)
 
 
 # ---------------------------------------------------------------------------
@@ -287,7 +264,7 @@ def main() -> None:
     ap.add_argument(
         "--suites", nargs="+",
         default=["cr_val", "cr_test", "ir_val", "ir_test"],
-        choices=["cr_val", "cr_test", "ir_val", "ir_test"],
+        choices=["cr_val", "cr_test", "ir_val", "ir_test", "ood_test"],
     )
     ap.add_argument(
         "--repos-root",
@@ -300,11 +277,17 @@ def main() -> None:
         help="Where to write per-(repo, commit) .pt indices.",
     )
     ap.add_argument("--embed-model-name", default="Qwen/Qwen3-Embedding-0.6B")
-    ap.add_argument("--chunk-tokens", type=int, default=512)
-    ap.add_argument("--overlap", type=int, default=64)
-    ap.add_argument("--max-chunks", type=int, default=300,
-                    help="Upper bound on chunks per (repo, commit) -- matches "
-                         "baselines/rag/build_indices.py.")
+    ap.add_argument(
+        "--chunk-mode", choices=["ast", "token"], default="ast",
+        help="ast: one chunk per top-level function/class (recommended). "
+             "token: legacy 512-token sliding windows.",
+    )
+    ap.add_argument("--chunk-tokens", type=int, default=512,
+                    help="Embedder max_length; also window size for token mode.")
+    ap.add_argument("--overlap", type=int, default=64,
+                    help="Token-mode overlap only.")
+    ap.add_argument("--max-chunks", type=int, default=0,
+                    help="Cap chunks per (repo, commit); 0 = no cap (ast mode).")
     ap.add_argument("--batch-size", type=int, default=32)
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--shard-i", type=int, default=0)
@@ -326,7 +309,8 @@ def main() -> None:
     print(f"[args] out_dir   = {out_dir}")
     print(f"[args] suites    = {args.suites}")
     print(f"[args] shard     = {args.shard_i + 1}/{args.num_shards}")
-    print(f"[args] embed     = {args.embed_model_name}", flush=True)
+    print(f"[args] embed     = {args.embed_model_name}")
+    print(f"[args] chunk_mode = {args.chunk_mode}", flush=True)
 
     keys = _enumerate_commit_keys(qna_dir, args.suites)
     print(f"\n[enumerate] total unique (repo, commit) keys: {len(keys):,}",
@@ -393,6 +377,7 @@ def main() -> None:
                 embed_model=model, embed_tokenizer=tokenizer, device=device,
                 chunk_tokens=args.chunk_tokens, overlap=args.overlap,
                 max_chunks=args.max_chunks, batch_size=args.batch_size,
+                chunk_mode=args.chunk_mode,
             )
         except Exception as e:
             print(f"  [error] {repo_id} @ {sha[:8]}: {type(e).__name__}: {e}",

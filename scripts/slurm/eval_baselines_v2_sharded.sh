@@ -33,7 +33,7 @@
 #     sbatch --array=0-15 scripts/slurm/eval_baselines_v2_sharded.sh
 #
 #   # RAG (top-k=3) against the per-commit chunk cache:
-#   METHOD=rag RAG_CACHE_DIR=$SCRATCH/RAG_CHUNK_CACHE_COMMITS RAG_TOP_K=3 \
+#   METHOD=rag RAG_CACHE_DIR=$SCRATCH/RAG_CHUNK_CACHE_AST_COMMITS RAG_TOP_K=3 \
 #     NUM_SHARDS=4 SUITES="ir_test cr_val" \
 #     sbatch --array=0-7 scripts/slurm/eval_baselines_v2_sharded.sh
 #
@@ -69,6 +69,11 @@ export PYTHONUNBUFFERED=1
 export HF_HOME="${HF_HOME:-$SCRATCH/REPO_DATASET/.hf_cache}"
 export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-$HF_HOME/hub}"
 export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$HF_HOME/hub}"
+# Force offline mode: the model files are already in HF_HOME from prior runs,
+# so all from_pretrained() calls should read from disk and never hit
+# huggingface.co/api/* (which triggers 429s under sharded parallelism).
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
 
 METHOD="${METHOD:-pretrained}"
 CKPT="${CKPT:-}"
@@ -116,10 +121,12 @@ fi
 
 # Context-injection methods (rag / drc).
 if [ "$METHOD" = "rag" ]; then
-    RAG_CACHE_DIR="${RAG_CACHE_DIR:-$SCRATCH/RAG_CHUNK_CACHE_COMMITS}"
+    RAG_CACHE_DIR="${RAG_CACHE_DIR:-$SCRATCH/RAG_CHUNK_CACHE_AST_COMMITS}"
     RAG_TOP_K="${RAG_TOP_K:-3}"
     RAG_EMBED_MODEL="${RAG_EMBED_MODEL:-Qwen/Qwen3-Embedding-0.6B}"
     RAG_QUERY_CHARS="${RAG_QUERY_CHARS:-2000}"
+    RAG_MAX_CONTEXT_TOKENS="${RAG_MAX_CONTEXT_TOKENS:-1536}"
+    RAG_HYBRID="${RAG_HYBRID:-1}"
     if [ ! -d "$RAG_CACHE_DIR" ]; then
         echo "[error] RAG_CACHE_DIR not found: $RAG_CACHE_DIR" >&2
         echo "        Build it with scripts/slurm/build_rag_cache_per_commit.sh" >&2
@@ -130,7 +137,13 @@ if [ "$METHOD" = "rag" ]; then
         --rag-top-k "$RAG_TOP_K"
         --rag-embed-model-name "$RAG_EMBED_MODEL"
         --rag-query-chars "$RAG_QUERY_CHARS"
+        --rag-max-context-tokens "$RAG_MAX_CONTEXT_TOKENS"
     )
+    if [ "$RAG_HYBRID" = "1" ]; then
+        EXTRA_ARGS+=(--rag-hybrid)
+    else
+        EXTRA_ARGS+=(--no-rag-hybrid)
+    fi
 fi
 if [ "$METHOD" = "drc" ]; then
     DRC_CACHE_DIR="${DRC_CACHE_DIR:-$SCRATCH/ORACLE_CONTEXT_CACHE_COMMITS}"

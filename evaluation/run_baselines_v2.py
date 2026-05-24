@@ -320,6 +320,63 @@ def _d2l_build_commit_doc(contexts: Dict[str, Dict[str, Any]],
 
 
 @torch.no_grad()
+def _doc2lora_repatch_lora_modules(model) -> None:
+    """Restore patched PEFT ``forward`` to base ``lora_forward`` (no A/B bound).
+
+    ``apply_lora_to_layers`` stacks partials; re-patch before each bind so
+    batch-size changes within a commit do not accumulate stale bindings.
+    """
+    from functools import partial
+
+    from ctx_to_lora.modeling.lora_layer import lora_forward
+    from ctx_to_lora.utils import get_layers, get_peft_modules
+
+    layers = get_layers(model.base_model)
+    for layer_idx in model.hypernet.layer_indices:
+        for module_info in get_peft_modules(layers[layer_idx], model.peft_config):
+            module = module_info["module"]
+            if not getattr(module, "patched_forward", False):
+                continue
+            module.forward = partial(
+                lora_forward,
+                self=module,
+                lora_dropout_p=model.peft_config.lora_dropout,
+                scaling=model.peft_config.lora_alpha,
+            )
+
+
+@torch.no_grad()
+def _doc2lora_bind_internalized_lora(model, batch_size: int) -> bool:
+    """Merge ``model.generated_loras`` and bind A/B into patched module forwards.
+
+    Mirrors ``ModulatedPretrainedModel.generate()`` when reusing
+    internalized weights: one context document, ``batch_size`` QnA rows.
+    """
+    generated = getattr(model, "generated_loras", None)
+    if not generated:
+        return False
+    device = model.device
+    n_chunks = torch.tensor([1], dtype=torch.int32, device=device)
+    combined = model.combine_lora(
+        generated,
+        n_chunks,
+        lora_bias=(model.hypernet.get_head_bias()
+                   if model.hypernet.config.use_bias else None),
+    )
+    # One internalized doc -> one ctx group; all batch rows share its LoRA.
+    n_queries = torch.tensor([batch_size], dtype=torch.int32, device=device)
+    _doc2lora_repatch_lora_modules(model)
+    model.apply_lora_to_layers(
+        model.base_model,
+        model.hypernet.layer_indices,
+        combined,
+        n_queries,
+        position_ids=None,
+    )
+    return True
+
+
+@torch.no_grad()
 def _doc2lora_internalize_commit(model, drc_cache_dir: Path, repo_id: str,
                                  commit_sha: str, ctx_tokenizer,
                                  max_ctx_tokens: int) -> bool:
@@ -503,10 +560,10 @@ def _generate_batch(model, tokenizer, device, input_ids_list: List[List[int]],
                     max_new_tokens: int) -> List[str]:
     """Left-pad a batch, generate, decode only the new tokens per sample.
 
-    For Doc-to-LoRA's ``ModulatedPretrainedModel`` we route through
-    ``model.base_model.generate`` because the outer model wraps the base
-    with its own ``.generate`` API (which expects context tokens, not
-    plain text inputs).
+    For Doc-to-LoRA, callers must run ``_doc2lora_bind_internalized_lora``
+    after ``internalize()`` so hypernet A/B tensors are bound into the
+    patched PEFT forwards; then we use ``base_model.generate`` (same as
+    ``baselines/doc2lora/evaluate_doc2lora.py``).
     """
     L = max(len(x) for x in input_ids_list)
     pad_id = tokenizer.pad_token_id or 0
@@ -550,57 +607,66 @@ def _rag_cache_path(cache_dir: Path, repo_id: str, sha: str) -> Path:
 
 def _load_rag_commit_index(cache_dir: Path, repo_id: str,
                            sha: str) -> Dict[str, Any]:
-    """Return ``{"chunks": [...], "embeddings": float32[N, D] | None}``.
-    Missing/empty cache => no retrieval; the QnA falls back to plain prefix."""
+    """Load per-commit RAG index (legacy token windows or ast_hybrid_v1)."""
+    from evaluation.rag_corpus import load_rag_index
+
     path = _rag_cache_path(cache_dir, repo_id, sha)
     if not path.exists():
-        return {"chunks": [], "embeddings": None}
+        return load_rag_index({})
     try:
         data = torch.load(path, map_location="cpu", weights_only=False)
     except Exception as e:
         print(f"  [rag] failed to load {path}: {type(e).__name__}: {e}",
               flush=True)
-        return {"chunks": [], "embeddings": None}
-    embs = data.get("embeddings")
-    if embs is not None and not isinstance(embs, torch.Tensor):
-        embs = torch.as_tensor(embs)
-    if embs is not None:
-        embs = embs.float()
-    return {"chunks": list(data.get("chunks") or []), "embeddings": embs}
+        return load_rag_index({})
+    return load_rag_index(data)
 
 
 @torch.inference_mode()
 def _embed_rag_queries(texts: List[str], embed_model, embed_tokenizer,
                        device, max_length: int = 512) -> torch.Tensor:
-    """Attention-mean pooled, L2-normalised query embeddings (CPU)."""
-    enc = embed_tokenizer(
-        texts, padding=True, truncation=True, max_length=max_length,
-        return_tensors="pt",
+    from evaluation.rag_corpus import embed_texts_mean_pool
+
+    embs = embed_texts_mean_pool(
+        embed_model, embed_tokenizer, texts, str(device),
+        max_length=max_length,
     )
-    enc = {k: v.to(device) for k, v in enc.items()}
-    out = embed_model(**enc)
-    mask = enc["attention_mask"].unsqueeze(-1)
-    pooled = (out.last_hidden_state * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
-    pooled = torch.nn.functional.normalize(pooled.float(), p=2, dim=-1)
-    return pooled.cpu()
+    return torch.nn.functional.normalize(embs.float(), p=2, dim=-1)
 
 
-def _rag_retrieve_topk(query_emb: torch.Tensor, index: Dict[str, Any],
-                       top_k: int) -> List[str]:
-    if not index["chunks"] or index["embeddings"] is None:
-        return []
-    embs = index["embeddings"]
-    sims = (query_emb @ embs.T).squeeze(0)
-    k = min(top_k, len(index["chunks"]))
-    _, top_idx = sims.topk(k)
-    return [index["chunks"][i] for i in top_idx.tolist()]
+def _rag_retrieve_and_compress(
+    prefix: str,
+    query_emb: torch.Tensor,
+    index: Dict[str, Any],
+    *,
+    top_k: int,
+    tokenizer,
+    rag_max_context_tokens: int,
+    rag_hybrid: bool,
+) -> str:
+    from evaluation.rag_corpus import (
+        compress_retrieved_chunks,
+        format_rag_prompt,
+        hybrid_retrieve_topk,
+    )
 
-
-def _format_rag_prompt(prefix: str, retrieved_chunks: List[str]) -> str:
-    """Plain code-completion prompt: retrieved chunks then prefix."""
-    if not retrieved_chunks:
+    if not index.get("chunks"):
         return prefix
-    return "\n\n\n".join(retrieved_chunks) + "\n\n\n" + prefix
+    query = prefix[-2000:]
+    if rag_hybrid and index.get("bm25") is not None:
+        chunks = hybrid_retrieve_topk(query, query_emb, index, top_k)
+    else:
+        embs = index.get("embeddings")
+        if embs is None or embs.numel() == 0:
+            return prefix
+        sims = (query_emb.float() @ embs.T).squeeze(0)
+        k = min(top_k, len(index["chunks"]))
+        _, top_idx = sims.topk(k)
+        chunks = [index["chunks"][i] for i in top_idx.tolist()]
+    ctx = compress_retrieved_chunks(
+        chunks, prefix, tokenizer, max_tokens=rag_max_context_tokens,
+    )
+    return format_rag_prompt(prefix, ctx)
 
 
 # ---------------------------------------------------------------------------
@@ -670,6 +736,8 @@ def score_suite(
     rag_embed_model=None,
     rag_embed_tokenizer=None,
     rag_query_chars: int = 2000,
+    rag_max_context_tokens: int = 1536,
+    rag_hybrid: bool = True,
     drc_cache_dir: Optional[Path] = None,
     drc_max_tokens: int = 4096,
 ) -> Dict[str, Any]:
@@ -846,8 +914,12 @@ def score_suite(
                 queries, rag_embed_model, rag_embed_tokenizer, device,
             )
             for p, qe in zip(pairs, q_embs):
-                chunks = _rag_retrieve_topk(qe.unsqueeze(0), rag_index, rag_top_k)
-                prompts.append(_format_rag_prompt(p["prefix"], chunks))
+                prompts.append(_rag_retrieve_and_compress(
+                    p["prefix"], qe.unsqueeze(0), rag_index,
+                    top_k=rag_top_k, tokenizer=tokenizer,
+                    rag_max_context_tokens=rag_max_context_tokens,
+                    rag_hybrid=rag_hybrid,
+                ))
         elif context_method == "drc" and drc_contexts:
             for p in pairs:
                 ctx = drc_contexts.get(_drc_key_for_qna(p), {})
@@ -872,6 +944,8 @@ def score_suite(
                                     max_input_tokens, bos_id)
                 for prompt in batch_prompts
             ]
+            if d2l_mode and getattr(model, "generated_loras", None):
+                _doc2lora_bind_internalized_lora(model, len(inputs))
             preds = _generate_batch(
                 model, tokenizer, device, inputs,
                 max_new_tokens=max_new_tokens,
@@ -1025,7 +1099,8 @@ def main() -> None:
                     help="Directory with v2 qna parquets (qna/<suite>.parquet).")
     ap.add_argument("--suites", nargs="+",
                     default=["ir_val", "ir_test", "cr_val", "cr_test"],
-                    choices=["ir_val", "ir_test", "cr_val", "cr_test"])
+                    choices=["ir_val", "ir_test", "cr_val", "cr_test",
+                             "ood_test"])
     ap.add_argument("--output-dir", required=True)
 
     ap.add_argument("--max-input-tokens", type=int, default=4096,
@@ -1072,6 +1147,13 @@ def main() -> None:
     ap.add_argument("--rag-query-chars", type=int, default=2000,
                     help="Length of the prefix tail used as the retrieval "
                          "query (matches baselines/rag/test_rag.py).")
+    ap.add_argument("--rag-max-context-tokens", type=int, default=1536,
+                    help="Relevance-compress retrieved chunks to this budget "
+                         "before prepending the prefix (WeChat-style).")
+    ap.add_argument("--rag-hybrid", action=argparse.BooleanOptionalAction,
+                    default=True,
+                    help="Fuse BM25 + dense retrieval when doc_tokens exist "
+                         "in the cache (ast_hybrid_v1).")
 
     # ---- DRC ------------------------------------------------------------
     ap.add_argument("--drc-cache-dir", type=str, default=None,
@@ -1191,6 +1273,8 @@ def main() -> None:
             rag_embed_model=rag_embed_model,
             rag_embed_tokenizer=rag_embed_tokenizer,
             rag_query_chars=args.rag_query_chars,
+            rag_max_context_tokens=args.rag_max_context_tokens,
+            rag_hybrid=args.rag_hybrid,
             drc_cache_dir=drc_cache_dir, drc_max_tokens=args.drc_max_tokens,
         )
         suite_summaries[suite] = s

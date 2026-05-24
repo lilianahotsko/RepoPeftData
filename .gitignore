@@ -69,3 +69,4 @@ PAW_CODE
 *.svg
 *.jsonl
 *.txt
+*jobid*

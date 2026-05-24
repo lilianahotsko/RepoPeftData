@@ -25,13 +25,16 @@
 
 set -euo pipefail
 
+# Capture user-provided REPOS_ROOT before common.sh's export clobbers it.
+_USER_REPOS_ROOT="${REPOS_ROOT:-}"
+
 source scripts/slurm/common.sh
 mkdir -p slurm_logs
 
 export PYTHONUNBUFFERED=1
 
 QNA_DIR="${QNA_DIR:-$SCRATCH/REPO_DATASET/code2lora_snapshots_hf/qna}"
-REPOS_ROOT="${REPOS_ROOT:-$SCRATCH/REPO_DATASET/repositories}"
+REPOS_ROOT="${_USER_REPOS_ROOT:-$SCRATCH/REPO_DATASET/repositories}"
 OUT_DIR="${OUT_DIR:-$SCRATCH/ORACLE_CONTEXT_CACHE_COMMITS}"
 TMP_ROOT="${TMP_ROOT:-${SLURM_TMPDIR:-/tmp}}"
 SUITES_STR="${SUITES:-cr_val cr_test ir_val ir_test}"

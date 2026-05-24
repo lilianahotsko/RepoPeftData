@@ -484,7 +484,8 @@ def main() -> None:
     ap.add_argument("--base-model", default=DEFAULT_BASE_MODEL)
     ap.add_argument("--target-modules", nargs="+", default=DEFAULT_TARGET_MODULES)
     ap.add_argument("--suite", required=True,
-                    choices=["ir_val", "ir_test", "cr_val", "cr_test"])
+                    choices=["ir_val", "ir_test", "cr_val", "cr_test",
+                             "ood_test"])
     ap.add_argument("--output-dir", required=True)
 
     ap.add_argument("--max-input-tokens", type=int, default=4096)
@@ -510,10 +511,12 @@ def main() -> None:
         device=device,
     )
 
-    in_repo_splits = (
-        None if args.suite.startswith("cr_")
-        else (["val"] if args.suite == "ir_val" else ["test"])
-    )
+    if args.suite.startswith("cr_") or args.suite == "ood_test":
+        in_repo_splits = None
+    elif args.suite == "ir_val":
+        in_repo_splits = ["val"]
+    else:
+        in_repo_splits = ["test"]
 
     commits_parquet = Path(args.commits_dir) / "commits" / f"{args.suite}.parquet"
     qna_parquet = Path(args.qnas_dir) / "qna" / f"{args.suite}.parquet"

@@ -100,6 +100,15 @@ _QNA_COLS = [
 ]
 
 
+def _columns_to_read(parquet_path: Path) -> List[str]:
+    """Return the subset of ``_QNA_COLS`` actually present in the parquet --
+    keeps the loader portable across in-distribution (has assertion_event_id)
+    and OOD (no assertion_event_id) qna banks."""
+    import pyarrow.parquet as pq
+    schema_names = set(pq.ParquetFile(str(parquet_path)).schema.names)
+    return [c for c in _QNA_COLS if c in schema_names]
+
+
 def _load_repo_qnas(
     qna_dir: Path, suites: List[str], repo_id: str,
 ) -> Dict[Tuple[str, str], List[Dict[str, Any]]]:
@@ -113,16 +122,18 @@ def _load_repo_qnas(
     for s in suites:
         direct = qna_dir / f"{s}.parquet"
         if direct.exists():
+            cols = _columns_to_read(direct)
             tbl = pq.read_table(
-                str(direct), columns=_QNA_COLS,
+                str(direct), columns=cols,
                 filters=[("repo_id", "=", repo_id)],
             )
         elif s in _SUITE_FALLBACK_IN_SPLIT:
             train = qna_dir / "train.parquet"
             if not train.exists():
                 continue
+            cols = _columns_to_read(train)
             tbl = pq.read_table(
-                str(train), columns=_QNA_COLS,
+                str(train), columns=cols,
                 filters=[
                     ("repo_id", "=", repo_id),
                     ("in_repo_split", "=", _SUITE_FALLBACK_IN_SPLIT[s]),
@@ -132,12 +143,15 @@ def _load_repo_qnas(
             continue
         if tbl.num_rows == 0:
             continue
+        present = set(tbl.column_names)
         shas = tbl["commit_sha"].to_pylist()
         tfs = tbl["test_file"].to_pylist()
         prefixes = tbl["prefix"].to_pylist()
         lines = tbl["lineno"].to_pylist()
-        cols = tbl["col_offset"].to_pylist()
-        eids = tbl["assertion_event_id"].to_pylist()
+        cols_v = tbl["col_offset"].to_pylist()
+        eids = (tbl["assertion_event_id"].to_pylist()
+                if "assertion_event_id" in present
+                else [""] * tbl.num_rows)
         tfuncs = tbl["test_function"].to_pylist()
         for i in range(tbl.num_rows):
             sh = shas[i]
@@ -148,7 +162,7 @@ def _load_repo_qnas(
                 "test_function": tfuncs[i] or "",
                 "prefix": prefixes[i] or "",
                 "lineno": int(lines[i]) if lines[i] is not None else 0,
-                "col_offset": int(cols[i]) if cols[i] is not None else 0,
+                "col_offset": int(cols_v[i]) if cols_v[i] is not None else 0,
                 "assertion_event_id": eids[i] or "",
                 "suite": s,
             })
@@ -281,7 +295,7 @@ def main() -> None:
     ap.add_argument(
         "--suites", nargs="+",
         default=["cr_val", "cr_test", "ir_val", "ir_test"],
-        choices=["train", "cr_val", "cr_test", "ir_val", "ir_test"],
+        choices=["train", "cr_val", "cr_test", "ir_val", "ir_test", "ood_test"],
     )
     ap.add_argument(
         "--repos-root",

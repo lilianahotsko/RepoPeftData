@@ -27,6 +27,9 @@
 
 set -euo pipefail
 
+# Capture user-provided REPOS_ROOT before common.sh's export clobbers it.
+_USER_REPOS_ROOT="${REPOS_ROOT:-}"
+
 source scripts/slurm/common.sh
 mkdir -p slurm_logs
 
@@ -36,7 +39,7 @@ export HUGGINGFACE_HUB_CACHE="${HUGGINGFACE_HUB_CACHE:-$HF_HOME/hub}"
 export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$HF_HOME/hub}"
 
 QNA_DIR="${QNA_DIR:-$SCRATCH/REPO_DATASET/code2lora_snapshots_hf/qna}"
-REPOS_ROOT="${REPOS_ROOT:-$SCRATCH/REPO_DATASET/repositories}"
+REPOS_ROOT="${_USER_REPOS_ROOT:-$SCRATCH/REPO_DATASET/repositories}"
 OUT_DIR="${OUT_DIR:-$SCRATCH/RAG_CHUNK_CACHE_COMMITS}"
 SUITES_STR="${SUITES:-cr_val cr_test ir_val ir_test}"
 read -r -a SUITES <<< "$SUITES_STR"
