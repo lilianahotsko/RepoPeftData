@@ -25,7 +25,9 @@ export PYTHONUNBUFFERED=1
 RRG_ACCOUNT="${RRG_ACCOUNT:-rrg-yuntian_gpu}"
 
 SCRATCH="${SCRATCH:-/scratch/lhotsko}"
-OOD_COMMITS_DIR="${OOD_COMMITS_DIR:-$SCRATCH/REPO_DATASET/commit_parquet_hf_v2_ood/commits}"
+# OOD commits with repo_state_embedding live under the snapshots build;
+# QnAs come from the v2 OOD bundle.
+OOD_COMMITS_DIR="${OOD_COMMITS_DIR:-$SCRATCH/REPO_DATASET/code2lora_snapshots_hf/commits}"
 OOD_QNA_DIR="${OOD_QNA_DIR:-$SCRATCH/REPO_DATASET/commit_parquet_hf_v2_ood/qna}"
 BASE_EMB="${BASE_EMB:-$SCRATCH/TEXT2LORA_DATA/code_embeddings_v2.pt}"
 OOD_EMB="${OOD_EMB:-$SCRATCH/TEXT2LORA_DATA/code_embeddings_v2_ood.pt}"

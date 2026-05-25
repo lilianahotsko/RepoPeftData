@@ -70,3 +70,5 @@ PAW_CODE
 *.jsonl
 *.txt
 *jobid*
+
+code2lora/
