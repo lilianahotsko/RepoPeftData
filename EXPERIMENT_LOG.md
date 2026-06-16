@@ -432,3 +432,55 @@ All figures generated in `analysis/figures/`:
 | prlv4_c1-c4 | 11291096-11291100 | PENDING |
 | Scale 300 | — | NOT SUBMITTED |
 | pLoRA + Oracle | — | NOT SUBMITTED |
+
+---
+
+## 2026-06-06: Code2LoRA-GRU anchor-only ablation (no diff signal)
+
+### Motivation
+
+Does the GRU's recurrence add anything *beyond* the anchor-commit
+`repo_state_embedding`? This ablation strips out the per-commit
+`diff_embedding` signal entirely while preserving everything else
+about the GRU pipeline: the LoRA head is the same `Code2LoRAHead`,
+the GRU unrolls the same number of steps per repo (N = kept commits
+in the v2 chronology), but every step receives the **same** input
+vector — the anchor's 2048-d `repo_state_embedding` from the
+Code2LoRA-snapshots dataset. Supervision is the static trainer's
+anchor QnAs (`code2lora_snapshots_hf/qna/train.parquet`), fired at
+the single GRU step whose `commit_sha` matches the anchor.
+
+Expected comparison points:
+- **Floor:** `train_code2lora_static_v2` numbers (1-step head on the
+  same anchor embedding + same anchor QnAs).
+- **Ceiling:** `train_code2lora_gru_v2` numbers (full per-commit
+  diff signal + smart-cap QnAs spread across commits).
+
+### Files
+
+- Trainer: `hypernetwork/train_code2lora_gru_anchor.py`
+- Slurm wrapper: `scripts/slurm/train_code2lora_gru_anchor.sh`
+
+### Smoke test (≈30 min on one H100)
+
+```bash
+sbatch --export=ALL,SUFFIX=smoke_anchor,EPOCHS=1,LIMIT_TRAIN_REPOS=5,LIMIT_EVAL_REPOS=2,EVAL_EVERY_REPOS=0 \
+       scripts/slurm/train_code2lora_gru_anchor.sh
+```
+
+Confirm in the log: per-repo lines print `N=<commit_count>` >1 and a
+non-zero `loss=...` at the anchor step.
+
+### Full launch
+
+```bash
+sbatch --export=ALL,SUFFIX=h100_v2_gru_anchor_3ep,EPOCHS=3 \
+       scripts/slurm/train_code2lora_gru_anchor.sh
+```
+
+Checkpoints land in
+`$SCRATCH/TRAINING_CHECKPOINTS/CODE2LORA_GRU/h100_v2_gru_anchor_3ep/`
+with the same `gru_head.{ep0,ep1,...,best,latest}.pt` naming as the
+v2 GRU trainer (with extra `anchor_only: True` flag inside the
+checkpoint dict).
+

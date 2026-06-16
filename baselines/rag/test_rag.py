@@ -146,13 +146,27 @@ def main():
     if hasattr(model.config, "use_cache"):
         model.config.use_cache = True
 
-    # Stop generation on FIM tokens — Qwen2.5-Coder can enter Fill-In-the-Middle
-    # mode when retrieved code chunks precede the prefix, producing garbage output.
-    # Adding FIM tokens as stop tokens prevents this without discarding the whole run.
-    _fim_strings = ["<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>", "<|fim_pad|>"]
-    _fim_ids = [tok.encode(t, add_special_tokens=False) for t in _fim_strings]
-    fim_stop_ids = [ids[0] for ids in _fim_ids if len(ids) == 1]
-    eos_ids = list({tok.eos_token_id} | set(fim_stop_ids))
+    # Qwen2.5-Coder can enter Fill-In-the-Middle / file-sep / repo-name mode
+    # when retrieved code chunks precede the prefix; that produces a degenerate
+    # ``<|fim_suffix|>...`` prediction in the very first slot. We forbid those
+    # tokens at decode time (``bad_words_ids``) so the model is forced to do a
+    # normal left-to-right continuation. Older revisions of this script stopped
+    # generation on FIM tokens, which yielded an empty prediction (EM=0)
+    # whenever the model wanted to emit one.
+    _bad_strings = [
+        "<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>", "<|fim_pad|>",
+        "<|file_sep|>", "<|repo_name|>", "<|im_start|>", "<|im_end|>",
+    ]
+    eos_ids = [tok.eos_token_id]
+    bad_words_ids = []
+    _seen_bad = set()
+    for _t in _bad_strings:
+        _tid = tok.convert_tokens_to_ids(_t)
+        if isinstance(_tid, int) and _tid >= 0 and _tid not in _seen_bad:
+            bad_words_ids.append([_tid])
+            _seen_bad.add(_tid)
+    if not bad_words_ids:
+        bad_words_ids = None
 
     bos_id = get_bos_id(tok)
 
@@ -191,6 +205,7 @@ def main():
                 input_t, max_new_tokens=args.max_new_tokens,
                 do_sample=False, pad_token_id=tok.pad_token_id,
                 eos_token_id=eos_ids,
+                bad_words_ids=bad_words_ids,
             )
         gen_ids = out[0][len(input_ids):].tolist()
         pred = tok.decode(gen_ids, skip_special_tokens=True)

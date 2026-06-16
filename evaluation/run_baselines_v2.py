@@ -555,6 +555,29 @@ def _get_bos_id(tok) -> Optional[int]:
 # Inference loop
 # ---------------------------------------------------------------------------
 
+_QWEN_BAD_TOKENS = (
+    "<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>", "<|fim_pad|>",
+    "<|file_sep|>", "<|repo_name|>",
+    "<|im_start|>", "<|im_end|>",
+)
+
+
+def _qwen_bad_words_ids(tokenizer) -> Optional[List[List[int]]]:
+    """Return ``bad_words_ids`` list for the Qwen2.5-Coder FIM / file-sep /
+    repo-name / chat-template special tokens. Generation will refuse to emit
+    them; this prevents RAG/DRC prompts from collapsing into FIM-style
+    suffix predictions for inputs that structurally look like FIM splits.
+    """
+    bad: List[List[int]] = []
+    seen = set()
+    for tok in _QWEN_BAD_TOKENS:
+        tid = tokenizer.convert_tokens_to_ids(tok)
+        if isinstance(tid, int) and tid >= 0 and tid not in seen:
+            bad.append([tid])
+            seen.add(tid)
+    return bad or None
+
+
 @torch.no_grad()
 def _generate_batch(model, tokenizer, device, input_ids_list: List[List[int]],
                     max_new_tokens: int) -> List[str]:
@@ -564,6 +587,13 @@ def _generate_batch(model, tokenizer, device, input_ids_list: List[List[int]],
     after ``internalize()`` so hypernet A/B tensors are bound into the
     patched PEFT forwards; then we use ``base_model.generate`` (same as
     ``baselines/doc2lora/evaluate_doc2lora.py``).
+
+    Qwen-FIM-aware decoding: when the input contains a prepended chunk
+    (RAG / DRC), Qwen2.5-Coder is prone to emit ``<|fim_suffix|>``
+    immediately and start predicting the suffix half of an imaginary FIM
+    split rather than continuing the user's prefix. We therefore pass
+    ``bad_words_ids`` for the FIM / file-sep / repo-name / chat-template
+    special tokens so they can never appear in the generation.
     """
     L = max(len(x) for x in input_ids_list)
     pad_id = tokenizer.pad_token_id or 0
@@ -579,6 +609,9 @@ def _generate_batch(model, tokenizer, device, input_ids_list: List[List[int]],
     gen_target = (model.base_model
                   if getattr(model, "_d2l_mode", False)
                   else model)
+    if not hasattr(tokenizer, "_qwen_bad_words_ids"):
+        tokenizer._qwen_bad_words_ids = _qwen_bad_words_ids(tokenizer)
+    bad_words_ids = tokenizer._qwen_bad_words_ids
     out = gen_target.generate(
         input_ids=input_ids,
         attention_mask=attn,
@@ -587,6 +620,7 @@ def _generate_batch(model, tokenizer, device, input_ids_list: List[List[int]],
         pad_token_id=tokenizer.pad_token_id,
         eos_token_id=tokenizer.eos_token_id,
         use_cache=True,
+        bad_words_ids=bad_words_ids,
     )
     # Strip the prefix off each row; whatever's left is the prediction.
     decoded: List[str] = []
@@ -740,6 +774,9 @@ def score_suite(
     rag_hybrid: bool = True,
     drc_cache_dir: Optional[Path] = None,
     drc_max_tokens: int = 4096,
+    predictions_out: Optional[Path] = None,
+    restrict_keys: Optional[set] = None,
+    method_label: str = "method",
 ) -> Dict[str, Any]:
     """Walk one v2 QnA parquet, group by (repo, commit), generate, score.
 
@@ -778,6 +815,17 @@ def score_suite(
         groups = {k: v for k, v in groups.items() if k[0] in repos_kept}
         print(f"[suite {suite_name}] limited to {repo_limit} repos -> "
               f"{len(groups)} (repo, commit) groups", flush=True)
+
+    if restrict_keys:
+        before = len(groups)
+        groups = {k: v for k, v in groups.items() if k in restrict_keys}
+        print(f"[suite {suite_name}] restrict-keys filter: kept "
+              f"{len(groups)} of {before} (repo, commit) groups", flush=True)
+
+    preds_fh = None
+    if predictions_out is not None:
+        predictions_out.parent.mkdir(parents=True, exist_ok=True)
+        preds_fh = open(predictions_out, "a")
 
     # ---- Sharding by repo (deterministic round-robin on sorted repo ids) ----
     all_repos = sorted({r for (r, _) in groups.keys()})
@@ -936,6 +984,7 @@ def score_suite(
             prompts = [p["prefix"] for p in pairs]
 
         commit_samples: List[Tuple[float, float, float]] = []
+        qna_pos_offset = 0
         for i in range(0, len(pairs), batch_size):
             batch_pairs = pairs[i:i + batch_size]
             batch_prompts = prompts[i:i + batch_size]
@@ -950,13 +999,33 @@ def score_suite(
                 model, tokenizer, device, inputs,
                 max_new_tokens=max_new_tokens,
             )
-            for p, pred in zip(batch_pairs, preds):
+            for j, (p, prompt_used, pred) in enumerate(
+                    zip(batch_pairs, batch_prompts, preds)):
                 m = compute_metrics(pred, p["target"])
                 em = 1.0 if m["exact_match"] else 0.0
                 ed = float(m["edit_similarity"])
                 cb = float(m["code_bleu"])
                 commit_samples.append((em, ed, cb))
                 all_samples.append((em, ed, cb))
+                if preds_fh is not None:
+                    preds_fh.write(json.dumps({
+                        "method": method_label,
+                        "repo_id": repo_id,
+                        "commit_sha": commit_sha,
+                        "commit_index": g["commit_index"],
+                        "qna_pos": qna_pos_offset + j,
+                        "test_file": p.get("test_file", ""),
+                        "lineno": p.get("lineno", 0),
+                        "prefix": p["prefix"],
+                        "augmented_prompt": prompt_used,
+                        "target": p["target"],
+                        "prediction": pred,
+                        "exact_match": em,
+                        "edit_similarity": ed,
+                        "code_bleu": cb,
+                    }, ensure_ascii=False) + "\n")
+                    preds_fh.flush()
+            qna_pos_offset += len(batch_pairs)
         if commit_samples:
             n_c = len(commit_samples)
             em_m = sum(s[0] for s in commit_samples) / n_c
@@ -1131,6 +1200,15 @@ def main() -> None:
                     help="Total number of shards. Use SLURM job arrays to "
                          "fan out across GPUs; results land in suffixed "
                          "JSONs that merge_eval_shards.py recombines.")
+    ap.add_argument("--predictions-out", type=str, default=None,
+                    help="If set, append a JSONL with per-QnA "
+                         "{prefix, augmented_prompt, prediction, target, "
+                         "exact_match, edit_similarity, code_bleu} records.")
+    ap.add_argument("--restrict-keys", type=str, default=None,
+                    help="JSONL file with {repo_id, commit_sha} on each line; "
+                         "only those (repo, commit) groups are scored. Pair "
+                         "with --predictions-out to dump predictions for a "
+                         "sampled subset (e.g. the cards shown in the report).")
 
     # ---- RAG ------------------------------------------------------------
     ap.add_argument("--rag-cache-dir", type=str, default=None,
@@ -1246,6 +1324,18 @@ def main() -> None:
 
     shard_suffix = (f"_shard{args.shard_i}of{args.num_shards}"
                     if args.num_shards > 1 else "")
+    restrict_keys: Optional[set] = None
+    if args.restrict_keys:
+        rk: set = set()
+        for line in Path(args.restrict_keys).read_text().splitlines():
+            if not line.strip():
+                continue
+            rec = json.loads(line)
+            rk.add((rec["repo_id"], rec["commit_sha"]))
+        restrict_keys = rk
+        print(f"[restrict] loaded {len(restrict_keys)} (repo, commit) keys "
+              f"from {args.restrict_keys}", flush=True)
+    predictions_out = Path(args.predictions_out) if args.predictions_out else None
     suite_summaries: Dict[str, Any] = {}
     for suite in args.suites:
         qna_path = Path(args.qna_dir) / f"{suite}.parquet"
@@ -1276,6 +1366,9 @@ def main() -> None:
             rag_max_context_tokens=args.rag_max_context_tokens,
             rag_hybrid=args.rag_hybrid,
             drc_cache_dir=drc_cache_dir, drc_max_tokens=args.drc_max_tokens,
+            predictions_out=predictions_out,
+            restrict_keys=restrict_keys,
+            method_label=args.method,
         )
         suite_summaries[suite] = s
 

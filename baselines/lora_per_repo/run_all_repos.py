@@ -47,6 +47,10 @@ def main():
     ap.add_argument("--no-wandb", action="store_true")
     ap.add_argument("--no-eval", action="store_true",
                     help="Pass through to train_lora.py (disable in-training eval)")
+    ap.add_argument("--model-name", type=str, default="Qwen/Qwen2.5-Coder-1.5B",
+                    help="Base model for both train_lora.py and test_lora.py "
+                         "(default: Qwen/Qwen2.5-Coder-1.5B). Set to "
+                         "Qwen/Qwen2.5-Coder-3B for the 3B comparison.")
     args = ap.parse_args()
 
     splits_dir = Path(args.splits_dir).expanduser().resolve()
@@ -90,6 +94,7 @@ def main():
                     "--repo-name", repo,
                     "--epochs", str(args.epochs),
                     "--output-dir", str(Path(args.output_base) / repo),
+                    "--model-name", args.model_name,
                 ]
                 if args.no_wandb:
                     cmd.append("--no-wandb")
@@ -120,6 +125,7 @@ def main():
             "--splits-dir", str(splits_dir),
             "--split", args.eval_split,
             "--repo", repo,
+            "--model-name", args.model_name,
         ]
 
         print(f"  Evaluating on {args.eval_split}...")

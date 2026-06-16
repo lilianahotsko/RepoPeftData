@@ -297,6 +297,9 @@ def evaluate_suite(
     shard_i: int,
     num_shards: int,
     in_repo_splits_to_score: Optional[List[str]],
+    predictions_out: Optional[Path] = None,
+    restrict_keys: Optional[set] = None,
+    method_label: str = "code2lora",
 ) -> Dict[str, Any]:
     """Walk every (repo, snapshot) row in the suite and score its QnAs."""
     print(f"\n[suite {suite_name}] loading snapshots parquet "
@@ -327,7 +330,18 @@ def evaluate_suite(
     for qr in qna_rows:
         qnas_by_key[(qr.repo_id, qr.commit_sha)].append({
             "prefix": qr.prefix, "target": qr.target,
+            "test_file": getattr(qr, "test_file", ""),
+            "lineno": int(getattr(qr, "lineno", 0) or 0),
         })
+    if restrict_keys:
+        before = len(qnas_by_key)
+        qnas_by_key = {k: v for k, v in qnas_by_key.items() if k in restrict_keys}
+        print(f"[suite {suite_name}] restrict-keys filter: kept "
+              f"{len(qnas_by_key)} of {before} qnas-by-key groups", flush=True)
+    preds_fh = None
+    if predictions_out is not None:
+        predictions_out.parent.mkdir(parents=True, exist_ok=True)
+        preds_fh = open(predictions_out, "a")
     print(f"[suite {suite_name}] {len(qna_rows)} qnas, "
           f"{len(qnas_by_key)} (repo, commit) keys", flush=True)
 
@@ -388,6 +402,7 @@ def evaluate_suite(
             inject_lora_weights(base_model, specs, head_out, batch_index=0)
 
             commit_samples: List[Tuple[float, float, float]] = []
+            qna_pos_offset = 0
             for i in range(0, len(pairs), batch_size):
                 batch_pairs = pairs[i:i + batch_size]
                 inputs = [
@@ -399,13 +414,32 @@ def evaluate_suite(
                     base_model, tokenizer, device, inputs,
                     max_new_tokens=max_new_tokens,
                 )
-                for p, pred in zip(batch_pairs, preds):
+                for j, (p, pred) in enumerate(zip(batch_pairs, preds)):
                     m = compute_metrics(pred, p["target"])
                     em = 1.0 if m["exact_match"] else 0.0
                     ed = float(m["edit_similarity"])
                     cb = float(m["code_bleu"])
                     commit_samples.append((em, ed, cb))
                     all_samples.append((em, ed, cb))
+                    if preds_fh is not None:
+                        preds_fh.write(json.dumps({
+                            "method": method_label,
+                            "repo_id": row.repo_id,
+                            "commit_sha": row.commit_sha,
+                            "commit_index": int(row.commit_index),
+                            "qna_pos": qna_pos_offset + j,
+                            "test_file": p.get("test_file", ""),
+                            "lineno": p.get("lineno", 0),
+                            "prefix": p["prefix"],
+                            "augmented_prompt": p["prefix"],
+                            "target": p["target"],
+                            "prediction": pred,
+                            "exact_match": em,
+                            "edit_similarity": ed,
+                            "code_bleu": cb,
+                        }, ensure_ascii=False) + "\n")
+                        preds_fh.flush()
+                qna_pos_offset += len(batch_pairs)
             if commit_samples:
                 n_c = len(commit_samples)
                 per_commit_records.append({
@@ -484,6 +518,12 @@ def main() -> None:
     ap.add_argument("--shard-i", type=int, default=0)
     ap.add_argument("--num-shards", type=int, default=1)
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--predictions-out", type=str, default=None,
+                    help="If set, append a JSONL with per-QnA predictions.")
+    ap.add_argument("--restrict-keys", type=str, default=None,
+                    help="JSONL with {repo_id, commit_sha} per line.")
+    ap.add_argument("--method-label", default="code2lora",
+                    help="Label written into the predictions JSONL.")
     args = ap.parse_args()
 
     device = torch.device(args.device if (args.device != "cuda" or torch.cuda.is_available()) else "cpu")
@@ -515,6 +555,18 @@ def main() -> None:
     if not qna_parquet.exists():
         raise SystemExit(f"missing qna parquet: {qna_parquet}")
 
+    restrict_keys = None
+    if args.restrict_keys:
+        rk: set = set()
+        for line in Path(args.restrict_keys).read_text().splitlines():
+            if not line.strip():
+                continue
+            rec = json.loads(line)
+            rk.add((rec["repo_id"], rec["commit_sha"]))
+        restrict_keys = rk
+        print(f"[restrict] loaded {len(restrict_keys)} (repo, commit) keys",
+              flush=True)
+
     evaluate_suite(
         suite_name=args.suite,
         snapshots_parquet=snapshots_parquet,
@@ -530,6 +582,10 @@ def main() -> None:
         shard_i=args.shard_i,
         num_shards=args.num_shards,
         in_repo_splits_to_score=in_repo_splits,
+        predictions_out=(Path(args.predictions_out)
+                         if args.predictions_out else None),
+        restrict_keys=restrict_keys,
+        method_label=args.method_label,
     )
 
 

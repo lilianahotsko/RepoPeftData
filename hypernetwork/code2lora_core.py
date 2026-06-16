@@ -394,6 +394,43 @@ class CommitRow:
     repo_state_embedding: np.ndarray   # fp32 [2048]
 
 
+# ---------------------------------------------------------------------------
+# Per-step GRU input selection (ablation: diff vs. repo-state vs. concat)
+# ---------------------------------------------------------------------------
+
+PER_STEP_INPUT_MODES = ("diff", "repo_state", "concat")
+
+
+def per_step_input_dim(diff_dim: int, repo_dim: int, mode: str) -> int:
+    """Dimensionality of the per-step GRU input for the given ablation mode."""
+    if mode == "diff":
+        return diff_dim
+    if mode == "repo_state":
+        return repo_dim
+    if mode == "concat":
+        return diff_dim + repo_dim
+    raise ValueError(f"unknown per_step_input mode: {mode!r}")
+
+
+def make_per_step_input(row: "CommitRow", mode: str) -> np.ndarray:
+    """Return the per-step GRU input vector for ``row`` under ``mode``.
+
+    * ``diff``       -> per-commit diff_embedding (default / original v2 GRU).
+    * ``repo_state`` -> per-commit whole-repo repo_state_embedding.
+    * ``concat``     -> [diff_embedding ; repo_state_embedding].
+
+    NB: ``h_0`` is *always* initialized from ``rows[0].repo_state_embedding``
+    regardless of mode -- only the per-step recurrent input changes.
+    """
+    if mode == "diff":
+        return row.diff_embedding
+    if mode == "repo_state":
+        return row.repo_state_embedding
+    if mode == "concat":
+        return np.concatenate([row.diff_embedding, row.repo_state_embedding])
+    raise ValueError(f"unknown per_step_input mode: {mode!r}")
+
+
 def load_snapshot_rows(parquet_path: Path,
                        in_repo_splits: Optional[List[str]] = None,
                        repo_ids: Optional[List[str]] = None,

@@ -301,7 +301,16 @@ def main():
     parser.add_argument("--no-wandb", action="store_true", help="Disable wandb logging")
     parser.add_argument("--no-eval", action="store_true",
                         help="Disable in-training eval (avoids OOM at long context)")
+    parser.add_argument("--model-name", type=str,
+                        default="Qwen/Qwen2.5-Coder-1.5B",
+                        help="Base model to attach the per-repo LoRA to "
+                             "(default: Qwen/Qwen2.5-Coder-1.5B)")
     args = parser.parse_args()
+
+    # Allow swapping the frozen base (e.g. Qwen2.5-Coder-3B) without editing
+    # the module constant. Every downstream load reads the global MODEL_NAME.
+    global MODEL_NAME
+    MODEL_NAME = args.model_name
 
     scratch = os.environ.get("SCRATCH", os.path.expanduser("~/scratch"))
     default_output_base = os.path.join(scratch, "TRAINING_CHECKPOINTS", "PER_REPO_LORA")

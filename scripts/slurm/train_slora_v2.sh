@@ -24,6 +24,7 @@ export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$HF_HOME/hub}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
 QNA_PARQUET="${QNA_PARQUET:-$SCRATCH/REPO_DATASET/commit_parquet_hf_smartcap/qna/train.parquet}"
+MODEL_NAME="${MODEL_NAME:-Qwen/Qwen2.5-Coder-1.5B}"
 SUFFIX="${SUFFIX:-h100_v2}"
 OUT_DIR="$CKPT_DIR/SLORA_V2/${SUFFIX}"
 mkdir -p "$OUT_DIR"
@@ -44,6 +45,7 @@ if [ "$MAX_TRAIN_ROWS" != "0" ]; then
 fi
 
 echo "===== Train: SLoRA v2 (smart-cap train QnAs) ====="
+echo "Model       : $MODEL_NAME"
 echo "QnA parquet : $QNA_PARQUET"
 echo "Output dir  : $OUT_DIR"
 echo "Rank / Alph : $RANK / $ALPHA"
@@ -55,7 +57,7 @@ echo "Start       : $(date)"
 python baselines/single_lora/train_slora_v2.py \
     --qna-parquet "$QNA_PARQUET" \
     --output-dir "$OUT_DIR" \
-    --model-name Qwen/Qwen2.5-Coder-1.5B \
+    --model-name "$MODEL_NAME" \
     --rank "$RANK" --alpha "$ALPHA" \
     --epochs "$EPOCHS" --lr "$LR" \
     --max-seq-len "$MAX_SEQ_LEN" \

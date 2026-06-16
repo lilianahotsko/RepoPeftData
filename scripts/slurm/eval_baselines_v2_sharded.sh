@@ -77,6 +77,7 @@ export TRANSFORMERS_OFFLINE=1
 
 METHOD="${METHOD:-pretrained}"
 CKPT="${CKPT:-}"
+BASE_MODEL="${BASE_MODEL:-Qwen/Qwen2.5-Coder-1.5B}"
 QNA_DIR="${QNA_DIR:-$SCRATCH/REPO_DATASET/code2lora_snapshots_hf/qna}"
 SUITES_STR="${SUITES:-ir_val ir_test cr_val cr_test}"
 read -r -a SUITES <<< "$SUITES_STR"
@@ -215,6 +216,7 @@ fi
 
 echo "===== Eval baseline v2 SHARDED  task ${IDX}/${N_TASKS} ====="
 echo "Method        : $METHOD"
+echo "Base model    : $BASE_MODEL"
 echo "Checkpoint    : ${CKPT:-<none>}"
 echo "Suite         : $SUITE (suite_i=$SUITE_I)"
 echo "Shard         : $SHARD_I of $NUM_SHARDS"
@@ -225,6 +227,7 @@ nvidia-smi -L || true
 
 python evaluation/run_baselines_v2.py \
     --method "$METHOD" \
+    --base-model "$BASE_MODEL" \
     --qna-dir "$QNA_DIR" \
     --suites "$SUITE" \
     --output-dir "$OUT_DIR" \

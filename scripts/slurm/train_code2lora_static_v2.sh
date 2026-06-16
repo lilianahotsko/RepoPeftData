@@ -36,6 +36,7 @@ EPOCHS="${EPOCHS:-3}"
 LR="${LR:-1e-4}"
 LM_MICRO_BATCH="${LM_MICRO_BATCH:-2}"
 MAX_QNA_PER_SNAPSHOT="${MAX_QNA_PER_SNAPSHOT:-16}"
+SEED="${SEED:-3407}"
 # 4096 = verified-safe ceiling for the 720M-param Code2LoRAHead alongside
 # the 1.5B base + LoRA + gradient checkpointing on a single H100-80GB.
 # At seq_len=8192 the LM logits alone are ~9 GB at micro_batch=2 and the
@@ -62,6 +63,7 @@ echo "===== Train: Code2LoRA static v2 ====="
 echo "Snapshots dir : $SNAPSHOTS_DIR"
 echo "Output dir    : $OUT_DIR"
 echo "Epochs / LR   : $EPOCHS / $LR"
+echo "Seed          : $SEED"
 echo "Start         : $(date)"
 
 python hypernetwork/train_code2lora_static_v2.py \
@@ -78,7 +80,7 @@ python hypernetwork/train_code2lora_static_v2.py \
     --primary-eval-suite cr_val \
     --limit-eval-snapshots "$LIMIT_EVAL_SNAPS" \
     --log-every-iters "$LOG_EVERY_ITERS" \
-    --seed 3407 \
+    --seed "$SEED" \
     "${EXTRA_ARGS[@]}"
 
 echo "Done: $(date)"
