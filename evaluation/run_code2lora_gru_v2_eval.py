@@ -98,9 +98,16 @@ def _load_v2_gru_ckpt(
     target_modules: List[str],
     device: torch.device,
     dtype: torch.dtype = torch.bfloat16,
+    quantize: Optional[str] = None,
 ) -> Tuple[torch.nn.Module, CommitGRU, Code2LoRAHead, List[Any], Any]:
-    """Rebuild (base_model, gru, head, specs, tokenizer) from a v2 ckpt."""
-    print(f"[load] ckpt={ckpt_path}", flush=True)
+    """Rebuild (base_model, gru, head, specs, tokenizer) from a v2 ckpt.
+
+    ``quantize`` in {None, "4bit", "8bit"} loads the *frozen base LLM* with
+    bitsandbytes quantization while keeping the GRU/head/LoRA injection in
+    full precision -- this isolates the quality impact of quantizing only
+    the base model weights (the deployment scenario).
+    """
+    print(f"[load] ckpt={ckpt_path}  quantize={quantize}", flush=True)
     state = torch.load(str(ckpt_path), map_location="cpu", weights_only=False)
     head_cfg = state.get("head_config") or {}
     gru_cfg = state.get("gru_config") or {}
@@ -108,12 +115,32 @@ def _load_v2_gru_ckpt(
     tokenizer = AutoTokenizer.from_pretrained(base_model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    base_model = AutoModelForCausalLM.from_pretrained(
-        base_model_name,
-        torch_dtype=dtype,
-        attn_implementation="flash_attention_2",
-        device_map={"": device},
-    )
+
+    quantize = (quantize or "").lower() or None
+    if quantize in ("4bit", "8bit"):
+        from transformers import BitsAndBytesConfig
+        if quantize == "4bit":
+            bnb_cfg = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_compute_dtype=dtype,
+            )
+        else:
+            bnb_cfg = BitsAndBytesConfig(load_in_8bit=True)
+        base_model = AutoModelForCausalLM.from_pretrained(
+            base_model_name,
+            quantization_config=bnb_cfg,
+            attn_implementation="flash_attention_2",
+            device_map={"": device},
+        )
+    else:
+        base_model = AutoModelForCausalLM.from_pretrained(
+            base_model_name,
+            torch_dtype=dtype,
+            attn_implementation="flash_attention_2",
+            device_map={"": device},
+        )
     base_model.eval()
     for p in base_model.parameters():
         p.requires_grad = False
@@ -127,11 +154,17 @@ def _load_v2_gru_ckpt(
     head_hidden = int(head_cfg.get("hidden_dim", 1024))
     input_dim = int(head_cfg.get("input_dim",
                                  gru_cfg.get("hidden_dim", 2048)))
+    # Multi-task checkpoints carry num_tasks/task_dim; legacy ckpts default to 0
+    # (single-task) so they rebuild byte-identically.
+    num_tasks = int(head_cfg.get("num_tasks", 0))
+    task_dim = int(head_cfg.get("task_dim", 64))
     head = Code2LoRAHead(
         input_dim=input_dim,
         type_dims=type_dims,
         hidden_dim=head_hidden,
         rank=rank,
+        num_tasks=num_tasks,
+        task_dim=task_dim,
     ).to(device)
     head.load_state_dict(state["head_state"])
     head.eval()
@@ -146,7 +179,10 @@ def _load_v2_gru_ckpt(
     gru.eval()
 
     # Wrap base model with LoRA modules (matches training-time setup).
-    replace_with_lora(base_model, specs, rank=rank, alpha=alpha)
+    # For quantized bases, never dtype-cast the wrapper (bitsandbytes
+    # Params4bit weights must be left untouched); fp bases use "auto".
+    replace_with_lora(base_model, specs, rank=rank, alpha=alpha,
+                      cast_dtype=(None if quantize else "auto"))
     print(f"[load] base+LoRA ready, head rank={rank} alpha={alpha} "
           f"hidden={head_hidden}; gru hidden={gru.hidden_dim}; "
           f"types={sorted(type_dims)}", flush=True)
@@ -306,6 +342,7 @@ def evaluate_suite(
     restrict_keys: Optional[set] = None,
     method_label: str = "code2lora_gru",
     per_step_input: str = "diff",
+    task_to_idx: Optional[Dict[str, int]] = None,
 ) -> Dict[str, Any]:
     """Walk every repo in the suite, step the GRU per commit, score QnAs."""
     print(f"\n[suite {suite_name}] loading commits parquet {commits_parquet}",
@@ -330,6 +367,7 @@ def evaluate_suite(
             "prefix": qr.prefix, "target": qr.target,
             "test_file": getattr(qr, "test_file", ""),
             "lineno": int(getattr(qr, "lineno", 0) or 0),
+            "task": getattr(qr, "task", "assert_rhs"),
         })
     preds_fh = None
     if predictions_out is not None:
@@ -412,13 +450,21 @@ def evaluate_suite(
                 pairs = pairs[:qnas_per_commit_limit]
 
             ctx = gru.output_norm(h[-1])
-            head_out = head(ctx)
-            inject_lora_weights(base_model, specs, head_out, batch_index=0)
 
             commit_samples: List[Tuple[float, float, float]] = []
             qna_pos_offset = 0
-            for i in range(0, len(pairs), batch_size):
-                batch_pairs = pairs[i:i + batch_size]
+            # Group by task so a multi-task checkpoint conditions each example
+            # on the right task embedding. Single-task suites collapse to one
+            # group with task_id=None (identical to the original eval).
+            grouped: Dict[str, List[Dict[str, str]]] = {}
+            for p in pairs:
+                grouped.setdefault(p.get("task", "assert_rhs"), []).append(p)
+            for task_name, task_pairs in grouped.items():
+              tid = task_to_idx.get(task_name) if task_to_idx else None
+              head_out = head(ctx, task_id=tid)
+              inject_lora_weights(base_model, specs, head_out, batch_index=0)
+              for i in range(0, len(task_pairs), batch_size):
+                batch_pairs = task_pairs[i:i + batch_size]
                 inputs = [
                     _prepare_prefix_ids(tokenizer, p["prefix"],
                                         max_input_tokens, bos_id)
@@ -534,12 +580,20 @@ def main() -> None:
     ap.add_argument("--shard-i", type=int, default=0)
     ap.add_argument("--num-shards", type=int, default=1)
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--quantize", default=None,
+                    choices=[None, "4bit", "8bit"],
+                    help="Quantize the frozen base LLM with bitsandbytes "
+                         "(GRU/head/LoRA stay full precision). Default: none.")
     ap.add_argument("--predictions-out", type=str, default=None,
                     help="If set, append a JSONL with per-QnA predictions.")
     ap.add_argument("--restrict-keys", type=str, default=None,
                     help="JSONL with {repo_id, commit_sha} per line.")
     ap.add_argument("--method-label", default="code2lora_gru",
                     help="Label written into the predictions JSONL.")
+    ap.add_argument("--tasks", nargs="+", default=["assert_rhs"],
+                    help="Task ids in the same stable index order used at "
+                         "training time; selects each QnA's task embedding for "
+                         "multi-task checkpoints (single task -> no-op).")
     ap.add_argument("--per-step-input", default="auto",
                     choices=["auto", *PER_STEP_INPUT_MODES],
                     help="What the GRU ingests per commit step. 'auto' "
@@ -567,7 +621,7 @@ def main() -> None:
 
     base_model, gru, head, specs, tok = _load_v2_gru_ckpt(
         Path(args.checkpoint), args.base_model, args.target_modules,
-        device=device,
+        device=device, quantize=args.quantize,
     )
 
     if args.suite.startswith("cr_") or args.suite == "ood_test":
@@ -626,6 +680,7 @@ def main() -> None:
         restrict_keys=restrict_keys,
         method_label=args.method_label,
         per_step_input=per_step_input,
+        task_to_idx={t: i for i, t in enumerate(args.tasks)},
     )
 
 

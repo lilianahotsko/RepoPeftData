@@ -30,7 +30,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 import numpy as np
 import pyarrow as pa
@@ -55,12 +55,16 @@ def _file_sha256(p: Path, chunk_size: int = 1 << 20) -> str:
 
 
 def _read_embedding_shards(shards_dir: Path, embedding_col: str
-                           ) -> Dict[tuple, np.ndarray]:
-    """Read all shard parquets under shards_dir; return {(repo, sha): emb_vec[fp16]}."""
+                           ) -> Tuple[Dict[tuple, np.ndarray], int]:
+    """Read all shard parquets under shards_dir.
+
+    Returns ``({(repo, sha): emb_vec[fp16]}, embed_dim)`` where embed_dim is
+    inferred from the first non-empty vector (0 if no rows)."""
     shards = sorted(glob.glob(str(shards_dir / "shard_*.parquet")))
     if not shards:
         raise FileNotFoundError(f"No shards found under {shards_dir}")
     out: Dict[tuple, np.ndarray] = {}
+    dim = 0
     for sh in shards:
         t = pq.read_table(sh, memory_map=True)
         repo = t.column("repo_id").to_pylist()
@@ -68,24 +72,29 @@ def _read_embedding_shards(shards_dir: Path, embedding_col: str
         emb = t.column(embedding_col).to_pylist()
         # to_pylist() yields python lists; convert to numpy fp16 lazily.
         for r, s, e in zip(repo, sha, emb):
-            out[(r, s)] = np.asarray(e, dtype=np.float16)
+            v = np.asarray(e, dtype=np.float16)
+            out[(r, s)] = v
+            if dim == 0 and v.size:
+                dim = int(v.size)
         print(f"  read {sh}: +{t.num_rows} rows (running total {len(out)})",
               flush=True)
-    return out
+    return out, dim
 
 
 def _merge_split(commits_path: Path,
                  diff_map: Dict[tuple, np.ndarray],
                  repo_map: Dict[tuple, np.ndarray],
-                 out_path: Path) -> Dict[str, int]:
+                 out_path: Path,
+                 diff_dim: int,
+                 repo_dim: int) -> Dict[str, int]:
     """Append diff_embedding + repo_state_embedding to the commits table."""
     t = pq.read_table(commits_path, memory_map=True)
     n = t.num_rows
     repo_col = t.column("repo_id").to_pylist()
     sha_col = t.column("commit_sha").to_pylist()
 
-    diff_arr = np.zeros((n, EMBED_DIM), dtype=np.float16)
-    repo_arr = np.zeros((n, EMBED_DIM), dtype=np.float16)
+    diff_arr = np.zeros((n, diff_dim), dtype=np.float16)
+    repo_arr = np.zeros((n, repo_dim), dtype=np.float16)
     n_diff_hit = 0
     n_repo_hit = 0
     for i, (r, s) in enumerate(zip(repo_col, sha_col)):
@@ -98,9 +107,9 @@ def _merge_split(commits_path: Path,
             n_repo_hit += 1
 
     diff_col = pa.array(diff_arr.tolist(),
-                        type=pa.list_(pa.float16(), EMBED_DIM))
+                        type=pa.list_(pa.float16(), diff_dim))
     repo_col_arr = pa.array(repo_arr.tolist(),
-                            type=pa.list_(pa.float16(), EMBED_DIM))
+                            type=pa.list_(pa.float16(), repo_dim))
     t2 = t.append_column("diff_embedding", diff_col)
     t2 = t2.append_column("repo_state_embedding", repo_col_arr)
 
@@ -119,6 +128,11 @@ def main() -> None:
     ap.add_argument("--out-dir", default=DEFAULT_OUT_DIR)
     ap.add_argument("--splits", nargs="+",
                     default=["train", "cr_val", "cr_test"])
+    ap.add_argument("--model-name", default="Qwen/Qwen3-Embedding-0.6B",
+                    help="Encoder used to produce the shards (provenance only).")
+    ap.add_argument("--pooling", default="maxmean",
+                    choices=["maxmean", "lasttoken"],
+                    help="Pooling used to produce the shards (provenance only).")
     args = ap.parse_args()
 
     commits_dir = Path(args.commits_dir)
@@ -139,15 +153,20 @@ def main() -> None:
         print(f"  repo   : {repo_dir}", flush=True)
 
         t0 = time.time()
-        diff_map = _read_embedding_shards(diff_dir, "diff_embedding")
-        print(f"  diff_map: {len(diff_map)} keys ({(time.time()-t0):.1f}s)",
-              flush=True)
+        diff_map, diff_dim = _read_embedding_shards(diff_dir, "diff_embedding")
+        print(f"  diff_map: {len(diff_map)} keys, dim={diff_dim} "
+              f"({(time.time()-t0):.1f}s)", flush=True)
         t1 = time.time()
-        repo_map = _read_embedding_shards(repo_dir, "repo_state_embedding")
-        print(f"  repo_map: {len(repo_map)} keys ({(time.time()-t1):.1f}s)",
-              flush=True)
+        repo_map, repo_dim = _read_embedding_shards(repo_dir, "repo_state_embedding")
+        print(f"  repo_map: {len(repo_map)} keys, dim={repo_dim} "
+              f"({(time.time()-t1):.1f}s)", flush=True)
+        diff_dim = diff_dim or EMBED_DIM
+        repo_dim = repo_dim or EMBED_DIM
 
-        stats = _merge_split(commits_path, diff_map, repo_map, out_path)
+        stats = _merge_split(commits_path, diff_map, repo_map, out_path,
+                             diff_dim=diff_dim, repo_dim=repo_dim)
+        stats["diff_dim"] = diff_dim
+        stats["repo_dim"] = repo_dim
         sha = _file_sha256(out_path)
         stats["sha256"] = sha
         stats["out_path"] = str(out_path)
@@ -159,28 +178,42 @@ def main() -> None:
     # Also copy / symlink qna + splits + provenance from the v1 dataset so the
     # output dir is self-contained for the push step. We just write a small
     # README describing the new columns; the push script will copy v1 qna/.
+    _any = next(iter(summary.values()), {}) if summary else {}
+    diff_dim = _any.get("diff_dim", EMBED_DIM)
+    repo_dim = _any.get("repo_dim", EMBED_DIM)
+    if args.pooling == "lasttoken":
+        diff_pooling = "last-token + L2-norm per chunk -> mean over chunks + L2-norm"
+        file_pooling = "last-token + L2-norm per chunk -> mean over chunks + L2-norm"
+        repo_pooling = "mean over file vectors then L2-normalize"
+        diff_norm = repo_norm = "L2"
+    else:
+        diff_pooling = "concat(MaxPool, MeanPool)"
+        file_pooling = "attention_mean -> mean over chunks"
+        repo_pooling = "concat(mean_files, max_files) then L2-normalize"
+        diff_norm, repo_norm = "none", "L2"
     readme = {
-        "model": "Qwen/Qwen3-Embedding-0.6B",
+        "model": args.model_name,
+        "pooling": args.pooling,
         "diff_embedding": {
-            "dim": EMBED_DIM,
+            "dim": diff_dim,
             "dtype": "float16",
             "chunk_tokens": 512,
             "chunk_overlap": 64,
             "max_length": 512,
-            "pooling": "concat(MaxPool, MeanPool)",
-            "normalization": "none",
+            "pooling": diff_pooling,
+            "normalization": diff_norm,
             "source": "production_code_diff (filtered, test hunks removed)",
         },
         "repo_state_embedding": {
-            "dim": EMBED_DIM,
+            "dim": repo_dim,
             "dtype": "float16",
             "chunk_tokens": 2048,
             "chunk_overlap": 256,
             "max_file_bytes": 2_000_000,
             "min_window_tokens": 8,
-            "file_pooling": "attention_mean -> mean over chunks (1024-d)",
-            "repo_pooling": "concat(mean_files, max_files) then L2-normalize",
-            "normalization": "L2",
+            "file_pooling": file_pooling,
+            "repo_pooling": repo_pooling,
+            "normalization": repo_norm,
             "file_filter": "tracked .py blobs <= 2 MB",
         },
         "splits": summary,

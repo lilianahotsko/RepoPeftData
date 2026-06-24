@@ -484,3 +484,235 @@ with the same `gru_head.{ep0,ep1,...,best,latest}.pt` naming as the
 v2 GRU trainer (with extra `anchor_only: True` flag inside the
 checkpoint dict).
 
+---
+
+## 2026-06-17: Hypernetwork-Size Ablation (base model fixed)
+
+### Motivation
+
+Top-tier-paper ablation: hold the base model fixed (Qwen2.5-Coder-1.5B)
+and scale ONLY the hypernetwork capacity to show how task metrics move
+with hypernet parameter count (does capacity help, saturate, or hurt?).
+
+Capacity is a single joint width multiplier `m`:
+`head_hidden = 1024*m` and (GRU only) `gru_hidden = 2048*m`. Everything
+else is held fixed for a fair scaling curve: `rank=16`, `alpha=32`,
+`max-seq-len=4096`, `epochs`, `seed=3407`, identical train/eval data.
+
+Single-H100-80GB feasibility (AdamW => ~16 bytes/trainable param):
+
+| m | head / gru | ~hypernet params | single H100-80GB |
+|---|------------|------------------|------------------|
+| 0.5 | 512 / 1024 | ~0.37B | comfortable |
+| 1 | 1024 / 2048 (default) | ~0.75B | comfortable |
+| 2 | 2048 / 4096 | ~1.5B | fine |
+| 4 | 4096 / 8192 | ~3.3B | near ceiling (drop seq-len or use mgpu trainer if OOM) |
+| 8 | 8192 / 16384 | ~5.8B+ | does NOT fit one H100 |
+
+Static variant has no GRU, so only `head_hidden` scales (512/1024/2048/4096).
+
+### Code / scripts
+
+- `scripts/slurm/train_code2lora_gru_v2.sh`: `HEAD_HIDDEN`/`GRU_HIDDEN`
+  now folded into the default `SUFFIX` (`h100_v2_gru_3ep_h{H}_g{G}`).
+- `scripts/slurm/train_code2lora_static_v2.sh`: `--head-hidden-dim` now
+  `HEAD_HIDDEN` env-overridable; size folded into `SUFFIX`.
+- `scripts/slurm/sweep_hypernet_size_gru.sh` / `..._static.sh`: submit
+  one training job per size.
+- `scripts/slurm/sweep_hypernet_size_eval.sh`: submit the sharded eval
+  array per finished checkpoint (re-runnable; skips missing checkpoints).
+- `analysis/plot_hypernet_size_scaling.py`: counts hypernet params from
+  each checkpoint and plots metric-vs-params curves (figure ->
+  `analysis/figures/hypernet_size_scaling.{pdf,png}`).
+- No eval-code changes: both v2 eval scripts rebuild head/GRU from the
+  checkpoint's `head_config.hidden_dim` / `gru_config.hidden_dim`.
+
+### Training jobs submitted (2026-06-17)
+
+Originally submitted to `def-yuntian` (jobs 16253810-16253832), then cancelled
+and resubmitted to `rrg-yuntian` (pass `ACCOUNT=rrg-yuntian` to the sweep
+launchers). Current job IDs:
+
+| Variant | m | head / gru | SUFFIX | Job ID | Account |
+|---------|---|------------|--------|--------|---------|
+| GRU | 0.5 | 512 / 1024 | h100_v2_gru_3ep_h512_g1024 | 16254479 | rrg-yuntian |
+| GRU | 1 | 1024 / 2048 | h100_v2_gru_3ep_h1024_g2048 | 16254480 | rrg-yuntian |
+| GRU | 2 | 2048 / 4096 | h100_v2_gru_3ep_h2048_g4096 | 16254481 | rrg-yuntian |
+| GRU | 4 | 4096 / 8192 | h100_v2_gru_3ep_h4096_g8192 | 16254482 | rrg-yuntian |
+| static | 0.5 | 512 | h100_v2_static_3ep_h512 | 16254483 | rrg-yuntian |
+| static | 1 | 1024 | h100_v2_static_3ep_h1024 | 16254484 | rrg-yuntian |
+| static | 2 | 2048 | h100_v2_static_3ep_h2048 | 16254485 | rrg-yuntian |
+| static | 4 | 4096 | h100_v2_static_3ep_h4096 | 16254486 | rrg-yuntian |
+
+### Eval + analysis (after training finishes)
+
+```bash
+# 1) submit sharded eval per finished checkpoint (re-runnable)
+bash scripts/slurm/sweep_hypernet_size_eval.sh
+
+# 2) merge shards per eval dir
+for d in $CKPT_DIR/CODE2LORA_GRU_EVAL_V2/gru_h* \
+         $CKPT_DIR/CODE2LORA_STATIC_EVAL_V2/static_h*; do
+    python evaluation/merge_eval_shards.py --auto-detect --input-dir "$d"
+done
+
+# 3) table + figure
+python analysis/plot_hypernet_size_scaling.py \
+    --dump-json analysis/figures/hypernet_size_scaling.json
+```
+
+### Scaling Results (ir_test / cr_test) — TO FILL after eval
+
+| Variant | m | head / gru | Hypernet params | CR EM | CR ES | CR CB | IR EM | IR ES | IR CB |
+|---------|---|------------|-----------------|-------|-------|-------|-------|-------|-------|
+| GRU | 0.5 | 512 / 1024 | | | | | | | |
+| GRU | 1 | 1024 / 2048 | | | | | | | |
+| GRU | 2 | 2048 / 4096 | | | | | | | |
+| GRU | 4 | 4096 / 8192 | | | | | | | |
+| static | 0.5 | 512 | | | | | | | |
+| static | 1 | 1024 | | | | | | | |
+| static | 2 | 2048 | | | | | | | |
+| static | 4 | 4096 | | | | | | | |
+
+---
+
+## 2026-06-17: Scaled-up Embedding-Model Ablation (harrier-oss-v1-27b)
+
+### Motivation
+
+Complementary axis to the hypernetwork-size sweep: keep the base LLM
+(Qwen2.5-Coder-1.5B) AND the hypernet size fixed at the default (m=1), and
+scale up only the *encoder* that produces the `diff_embedding` /
+`repo_state_embedding` vectors the GRU consumes. Swap the default encoder
+`Qwen/Qwen3-Embedding-0.6B` (1024-d hidden, masked-mean, 2048-d output) for
+`microsoft/harrier-oss-v1-27b` (27B decoder embedder, 5376-d, last-token +
+L2-norm, 32k context, MTEB-v2 SOTA).
+
+### Recipe difference (handled in code)
+
+| | Qwen3-0.6B (default) | harrier-27b (this run) |
+|---|---|---|
+| per-chunk pooling | masked mean | last non-pad token + L2-norm |
+| across-chunk / file | concat(max, mean) | mean + L2-norm |
+| diff embedding dim | 2048 | 5376 |
+| repo_state dim | 2048 | 5376 |
+| dtype | fp32 | bf16 |
+
+A new `--pooling lasttoken` mode was added to the embedders; embedding dims
+now flow through the merge/snapshots/training/eval code automatically (the
+GRU/head infer input dims from the parquet data).
+
+### Code changes
+
+- `hypernetwork/train_code2lora_gru_commits.py`: `DiffEmbedder` gains a
+  `pooling` arg (`maxmean` default | `lasttoken`) + `DIFF_POOLING_MODES`.
+- `create_dataset/build_diff_embeddings_shard.py`: `--pooling`, `--dtype`.
+- `create_dataset/build_repo_state_embeddings_shard.py`: `--model-name`,
+  `--pooling`, `--dtype`, `--blob-batch`; per-file/per-snapshot dims derived
+  from `AutoConfig.hidden_size` + pooling.
+- `create_dataset/merge_gru_v2_embeddings.py`: infers per-column dim from the
+  shards (no hardcoded 2048); `--model-name`/`--pooling` for README provenance.
+- `create_dataset/build_code2lora_snapshots_parquet.py`: README embed_dim
+  inferred from data.
+
+### New scripts (harrier-specific paths; Qwen3 dataset untouched)
+
+- `scripts/slurm/build_diff_embeddings_harrier27b.sh` (GPU array)
+- `scripts/slurm/build_repo_state_embeddings_harrier27b.sh` (GPU array;
+  separate blob cache `static_commit/cache_harrier27b`)
+- `scripts/slurm/run_harrier27b_pipeline.sh` (orchestrates diff -> repo_state
+  -> merge -> snapshots with Slurm dependencies)
+- `scripts/slurm/smoke_harrier27b_embed.sh` (tiny subset; asserts 5376-d)
+- `scripts/slurm/train_gru_harrier27b.sh` (retrain GRU on the harrier dataset)
+
+Dataset paths:
+- shards : `commit_parquet_hf_v2_harrier27b_shards/{diff,repo_state}`
+- merged : `commit_parquet_hf_v2_harrier27b`
+- snaps  : `code2lora_snapshots_harrier27b_hf`
+
+### Workflow
+
+```bash
+# 0) Smoke test (validates 5376-d output end-to-end on one GPU)
+ACCOUNT=rrg-yuntian sbatch scripts/slurm/smoke_harrier27b_embed.sh   # job 16255400
+
+# 1) Full embedding pipeline (diff + repo_state -> merge -> snapshots)
+ACCOUNT=rrg-yuntian bash scripts/slurm/run_harrier27b_pipeline.sh
+
+# 2) Retrain GRU on the harrier embeddings (base LLM + hypernet size fixed)
+ACCOUNT=rrg-yuntian bash scripts/slurm/train_gru_harrier27b.sh
+
+# 3) Evaluate (sharded) against the harrier dataset
+CKPT=$CKPT_DIR/CODE2LORA_GRU/h100_v2_gru_3ep_harrier27b/gru_head.best.pt \
+  COMMITS_DIR=$SCRATCH/REPO_DATASET/commit_parquet_hf_v2_harrier27b \
+  QNAS_DIR=$SCRATCH/REPO_DATASET/code2lora_snapshots_harrier27b_hf \
+  SUITES="ir_test cr_test" SUFFIX=gru_harrier27b NUM_SHARDS=4 \
+  sbatch --account=rrg-yuntian --array=0-7 \
+    scripts/slurm/eval_code2lora_gru_v2_sharded.sh
+# then: python evaluation/merge_eval_shards.py --auto-detect --input-dir \
+#   $CKPT_DIR/CODE2LORA_GRU_EVAL_V2/gru_harrier27b
+```
+
+### Notes / risks
+
+- harrier-27b bf16 (~54 GB) fits one H100-80GB for inference. The repo-state
+  job is the heaviest (empty blob cache -> every `.py` blob re-embedded with
+  the 27B model); budget the full wall-time and many shards.
+- The smoke job downloads the model (~54 GB) on first run.
+
+### Launch (2026-06-22) — setting #2 (bigger embedding model only)
+
+Smoke (job 16255400) PASSED on 2026-06-17: diff + repo_state both 5376-d.
+Submitted the full end-to-end chain hands-off (m=1 hypernet, harrier-27b encoder):
+
+| Step | Job | Account | Depends on |
+|------|-----|---------|------------|
+| diff embeddings (array 0-15)   | 16536926 | rrg-yuntian_gpu | — |
+| repo_state embeddings (0-15)   | 16536927 | rrg-yuntian_gpu | — |
+| merge shards                   | 16536938 | def-yuntian_cpu | afterok 26,27 |
+| build snapshots                | 16536939 | def-yuntian_cpu | afterok 38 |
+| GRU retrain (m=1)              | 16536960 | rrg-yuntian_gpu | afterok 38 |
+| GRU eval ir_test+cr_test (0-7) | 16536967 | rrg-yuntian_gpu | afterok 60 |
+
+### Launch (2026-06-23) — setting #3 (both bigger: harrier-27b + m=2 hypernet)
+
+Once the harrier merged dataset existed (job 16536938), setting #3 needed no new
+embeddings — it just retrains the GRU on the harrier dataset with a wider hypernet
+(GRU_HIDDEN=4096, HEAD_HIDDEN=2048; ~1.5B HN params). m=2 chosen because m=4
+(~3.2B) OOMs on one H100 at seq=4096 (would need MAX_SEQ_LEN=2048 fallback).
+
+| Step | Job | Account | Depends on |
+|------|-----|---------|------------|
+| GRU retrain (harrier, m=2)     | 16592659 | rrg-yuntian_gpu | — (data ready) |
+| GRU eval ir_test+cr_test (0-7) | 16592663 | rrg-yuntian_gpu | afterok 16592659 |
+
+This yields a clean **2x2 ablation** (encoder x hypernet size):
+
+|            | Qwen3-0.6B (2048-d) | harrier-27b (5376-d) |
+|------------|---------------------|----------------------|
+| HN m=1     | baseline (GRU h1024_g2048) | **#2** (16536960) |
+| HN m=2     | **#1** (GRU h2048_g4096)   | **#3** (16592659) |
+
+Notes:
+- `rrg-yuntian` is only valid for **GPU** jobs (`rrg-yuntian_gpu`); CPU merge/snapshot
+  steps must use `def-yuntian` (no `rrg-yuntian_cpu` membership). The orchestrator's
+  single-account assumption fails on the CPU steps, so those were submitted separately.
+- Embedding splits = `train cr_val cr_test`. `ir_test` is **derived from train.parquet**
+  (in-repo held-out commits tagged `in_repo_split=test`), so no separate ir_test
+  embeddings are needed — the eval reuses the train embeddings.
+- Retrain/eval reuse encoder-independent QnAs (`commit_parquet_hf_smartcap` for train,
+  `code2lora_snapshots_hf` for eval suites).
+- After eval: `python evaluation/merge_eval_shards.py --auto-detect --input-dir \
+  $CKPT_DIR/CODE2LORA_GRU_EVAL_V2/gru_harrier27b`
+
+### Results (ir_test / cr_test) — TO FILL after retrain + eval
+
+Both rows are the **GRU, m=1** variant (only the encoder differs). The default-encoder
+row needs the GRU m=1 Qwen3 test eval (setting #1, currently "pending" — its checkpoint
+exists at `CODE2LORA_GRU/h100_v2_gru_3ep_h1024_g2048`), so both rows fill in together.
+
+| Encoder | Params | Emb dim | CR EM | CR ES | CR CB | IR EM | IR ES | IR CB |
+|---------|--------|---------|-------|-------|-------|-------|-------|-------|
+| Qwen3-Embedding-0.6B (default) | 0.6B | 2048 | | | | | | |
+| harrier-oss-v1-27b | 27B | 5376 | | | | | | |
+

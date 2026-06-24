@@ -141,12 +141,23 @@ def get_module_specs(model: nn.Module, target_module_types: List[str]
 
 
 def replace_with_lora(model: nn.Module, specs: List[ModuleSpec],
-                      rank: int, alpha: float) -> None:
+                      rank: int, alpha: float,
+                      cast_dtype: Any = "auto") -> None:
     """Replace each target ``nn.Linear`` in ``model`` with a :class:`LoRA`
-    wrapper. Idempotent."""
+    wrapper. Idempotent.
+
+    ``cast_dtype`` controls how the new wrapper is placed:
+      * ``"auto"`` (default): cast the wrapper to the model's param dtype --
+        the original behavior, correct for fp16/bf16/fp32 bases.
+      * ``None``: only move to the model's device, **never** cast dtype. Use
+        this for quantized bases (bitsandbytes 4-bit/8-bit), whose
+        ``Params4bit`` weights must not be dtype-cast.
+      * an explicit ``torch.dtype``: cast to that dtype.
+    """
     named = dict(model.named_modules())
     device = next(model.parameters()).device
-    dtype = next(model.parameters()).dtype
+    if cast_dtype == "auto":
+        cast_dtype = next(model.parameters()).dtype
     for sp in specs:
         parent_name, attr = sp.full_name.rsplit(".", 1)
         orig = getattr(named[parent_name], attr)
@@ -154,8 +165,11 @@ def replace_with_lora(model: nn.Module, specs: List[ModuleSpec],
             continue
         assert isinstance(orig, nn.Linear), \
             f"{sp.full_name} is not nn.Linear (got {type(orig)})"
-        wrapped = LoRA(orig, sp.in_features, sp.out_features,
-                       rank, alpha).to(device=device, dtype=dtype)
+        wrapped = LoRA(orig, sp.in_features, sp.out_features, rank, alpha)
+        if cast_dtype is None:
+            wrapped = wrapped.to(device=device)
+        else:
+            wrapped = wrapped.to(device=device, dtype=cast_dtype)
         setattr(named[parent_name], attr, wrapped)
 
 
@@ -219,6 +233,8 @@ class Code2LoRAHead(nn.Module):
         hidden_dim: int = 1024,
         rank: int = 16,
         init_log_scale: float = -3.5,
+        num_tasks: int = 0,
+        task_dim: int = 64,
     ):
         super().__init__()
         self.input_dim = input_dim
@@ -226,9 +242,18 @@ class Code2LoRAHead(nn.Module):
         self.rank = rank
         self.type_dims = dict(type_dims)
         self.types = sorted(type_dims.keys())
+        # Multi-task conditioning: when num_tasks>0, a learned task embedding is
+        # concatenated to ctx. num_tasks==0 -> identical to the single-task head.
+        self.num_tasks = int(num_tasks)
+        self.task_dim = int(task_dim) if self.num_tasks > 0 else 0
+        if self.num_tasks > 0:
+            self.task_embedding = nn.Embedding(self.num_tasks, self.task_dim)
+            nn.init.normal_(self.task_embedding.weight, std=0.02)
+        else:
+            self.task_embedding = None
 
         self.trunk = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
+            nn.Linear(input_dim + self.task_dim, hidden_dim),
             nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim),
             nn.GELU(),
@@ -249,11 +274,25 @@ class Code2LoRAHead(nn.Module):
             t: nn.Parameter(torch.tensor(init_log_scale)) for t in self.types
         })
 
-    def forward(self, ctx: torch.Tensor) -> Dict[str, Dict[str, torch.Tensor]]:
+    def forward(self, ctx: torch.Tensor, task_id: Optional[Any] = None
+                ) -> Dict[str, Dict[str, torch.Tensor]]:
         # ctx: [B, input_dim] or [B, K, input_dim] (the K case max-pools).
         if ctx.dim() == 3:
             ctx = torch.max(ctx, dim=1).values
-        h = self.trunk(ctx.float())
+        ctx = ctx.float()
+        if self.task_embedding is not None:
+            bsz = ctx.shape[0]
+            if task_id is None:
+                idx = torch.zeros(bsz, dtype=torch.long, device=ctx.device)
+            elif torch.is_tensor(task_id):
+                idx = task_id.to(ctx.device).long().view(-1)
+                if idx.numel() == 1 and bsz > 1:
+                    idx = idx.expand(bsz)
+            else:
+                idx = torch.full((bsz,), int(task_id), dtype=torch.long,
+                                 device=ctx.device)
+            ctx = torch.cat([ctx, self.task_embedding(idx)], dim=-1)
+        h = self.trunk(ctx)
         h = F.normalize(h, p=2, dim=-1) * math.sqrt(self.hidden_dim)
 
         A_out: Dict[str, torch.Tensor] = {}
@@ -275,6 +314,8 @@ class Code2LoRAHead(nn.Module):
             "rank": self.rank,
             "types": self.types,
             "type_dims": {t: list(v) for t, v in self.type_dims.items()},
+            "num_tasks": self.num_tasks,
+            "task_dim": self.task_dim,
         }
 
 
@@ -551,6 +592,9 @@ class QnaRow:
     lineno: int = 0
     col_offset: int = 0
     assertion_event_id: str = ""
+    # Multi-task: which task this QnA trains/evaluates. Defaults to the
+    # original assertion-RHS task so legacy parquets load unchanged.
+    task: str = "assert_rhs"
 
 
 def load_qna_rows(parquet_path: Path,
@@ -565,7 +609,7 @@ def load_qna_rows(parquet_path: Path,
     needed = [c for c in (
         "repo_id", "commit_sha", "commit_index", "in_repo_split",
         "cross_repo_split", "test_file", "test_function", "prefix", "target",
-        "lineno", "col_offset", "assertion_event_id",
+        "lineno", "col_offset", "assertion_event_id", "task",
     ) if c in ds.schema.names]
     filters: List[Any] = []
     if in_repo_splits:
@@ -596,6 +640,7 @@ def load_qna_rows(parquet_path: Path,
     lineno_col = table.column("lineno").to_pylist() if "lineno" in cols else [0] * table.num_rows
     col_off_col = table.column("col_offset").to_pylist() if "col_offset" in cols else [0] * table.num_rows
     eid_col = table.column("assertion_event_id").to_pylist() if "assertion_event_id" in cols else [""] * table.num_rows
+    task_col = table.column("task").to_pylist() if "task" in cols else ["assert_rhs"] * table.num_rows
     keep_set = set(commit_keys) if commit_keys else None
     for i in range(table.num_rows):
         key = (repo_col[i], sha_col[i])
@@ -613,6 +658,7 @@ def load_qna_rows(parquet_path: Path,
             lineno=int(lineno_col[i]) if lineno_col[i] is not None else 0,
             col_offset=int(col_off_col[i]) if col_off_col[i] is not None else 0,
             assertion_event_id=eid_col[i] or "",
+            task=task_col[i] or "assert_rhs",
         ))
     return rows
 

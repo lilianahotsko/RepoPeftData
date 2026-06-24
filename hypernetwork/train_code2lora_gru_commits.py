@@ -108,8 +108,23 @@ def _make_text_chunks(
     return [tokenizer.decode(w, skip_special_tokens=True) for w in windows]
 
 
+#: Supported per-chunk / across-chunk pooling recipes for ``DiffEmbedder``.
+#:   * ``maxmean``   -- masked mean per chunk, then concat(MaxPool, MeanPool)
+#:                      over chunks -> 2*hidden. Original Qwen3-Embedding recipe.
+#:   * ``lasttoken`` -- last non-pad token per chunk + L2-norm, then mean over
+#:                      chunks + L2-norm -> hidden. Matches decoder embedding
+#:                      models (e.g. microsoft/harrier-oss-v1-*) whose intended
+#:                      usage is last-token pooling + L2 normalization.
+DIFF_POOLING_MODES = ("maxmean", "lasttoken")
+
+
 class DiffEmbedder:
-    """Wraps a frozen embedding model to produce [2*D] vectors from raw diff text."""
+    """Wraps a frozen embedding model to produce dense vectors from raw text.
+
+    Output dimensionality depends on ``pooling``: ``2*hidden`` for ``maxmean``
+    (concat of max/mean pools) and ``hidden`` for ``lasttoken`` (single
+    L2-normalized vector, matching decoder embedding models).
+    """
 
     def __init__(
         self,
@@ -120,7 +135,11 @@ class DiffEmbedder:
         overlap: int = 64,
         max_length: int = 512,
         batch_size: int = 8,
+        pooling: str = "maxmean",
     ):
+        if pooling not in DIFF_POOLING_MODES:
+            raise ValueError(f"unknown pooling {pooling!r}; "
+                             f"expected one of {DIFF_POOLING_MODES}")
         self.model = model
         self.tokenizer = tokenizer
         self.device = device
@@ -128,16 +147,18 @@ class DiffEmbedder:
         self.overlap = overlap
         self.max_length = max_length
         self.batch_size = batch_size
+        self.pooling = pooling
         self._embed_dim = model.config.hidden_size
-        self._zero = torch.zeros(2 * self._embed_dim)
+        self._zero = torch.zeros(self.embed_dim)
 
     @property
     def embed_dim(self) -> int:
-        return 2 * self._embed_dim
+        return self._embed_dim if self.pooling == "lasttoken" else 2 * self._embed_dim
 
     @torch.no_grad()
     def _embed_texts(self, texts: List[str]) -> torch.Tensor:
-        """Return a [len(texts), D] tensor on CPU (fp32)."""
+        """Return a [len(texts), hidden] tensor on CPU (fp32), pooled per
+        chunk according to ``self.pooling`` (masked-mean or last-token+L2)."""
         all_vecs = []
         for i in range(0, len(texts), self.batch_size):
             batch = texts[i : i + self.batch_size]
@@ -151,16 +172,35 @@ class DiffEmbedder:
             enc = {k: v.to(self.device, non_blocking=True) for k, v in enc.items()}
             out = self.model(**enc)
             last = out.last_hidden_state
-            mask = enc["attention_mask"].unsqueeze(-1).to(last.dtype)
-            mean = (last * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
-            # Accumulate on-device; only move to CPU once per diff at the end.
-            all_vecs.append(mean.detach())
+            if self.pooling == "lasttoken":
+                # Index of the last non-pad token per row -- robust to left or
+                # right padding -- then L2-normalize (decoder-embedder recipe).
+                am = enc["attention_mask"]
+                T = am.shape[1]
+                ar = torch.arange(T, device=am.device)
+                pos = torch.where(am.bool(), ar, torch.full_like(ar, -1))
+                last_idx = pos.max(dim=1).values.clamp(min=0)
+                vec = last[torch.arange(last.shape[0], device=last.device), last_idx]
+                vec = F.normalize(vec.float(), dim=-1)
+                all_vecs.append(vec.detach())
+            else:
+                mask = enc["attention_mask"].unsqueeze(-1).to(last.dtype)
+                mean = (last * mask).sum(dim=1) / mask.sum(dim=1).clamp(min=1)
+                # Accumulate on-device; only move to CPU once per diff at the end.
+                all_vecs.append(mean.detach())
         if not all_vecs:
             return torch.empty((0, self._embed_dim))
         return torch.cat(all_vecs, dim=0).float().cpu()
 
+    def _pool_chunks(self, chunk_embs: torch.Tensor) -> torch.Tensor:
+        """Pool [K, hidden] per-chunk vectors into the final embedding."""
+        if self.pooling == "lasttoken":
+            # Mean of the L2-normalized chunk vectors, renormalized -> [hidden].
+            return F.normalize(chunk_embs.mean(dim=0), dim=-1)
+        return pool_file_chunks_maxmean(chunk_embs)  # [2*hidden]
+
     def embed_diff(self, diff_text: str) -> torch.Tensor:
-        """Embed a single diff text string -> [2*D] vector (MaxPool||MeanPool)."""
+        """Embed a single diff text string -> [embed_dim] vector."""
         if not diff_text or not diff_text.strip():
             return self._zero.clone()
         chunks = _make_text_chunks(
@@ -168,8 +208,8 @@ class DiffEmbedder:
         )
         if not chunks:
             return self._zero.clone()
-        chunk_embs = self._embed_texts(chunks)  # [K, D] on CPU fp32
-        return pool_file_chunks_maxmean(chunk_embs)  # [2*D]
+        chunk_embs = self._embed_texts(chunks)  # [K, hidden] on CPU fp32
+        return self._pool_chunks(chunk_embs)  # [embed_dim]
 
     @torch.no_grad()
     def embed_diffs_batched(self, diff_texts: List[str]) -> torch.Tensor:
@@ -182,7 +222,7 @@ class DiffEmbedder:
         """
         n = len(diff_texts)
         if n == 0:
-            return torch.empty((0, 2 * self._embed_dim))
+            return torch.empty((0, self.embed_dim))
 
         per_diff_chunks: List[List[str]] = []
         counts: List[int] = []
@@ -210,7 +250,7 @@ class DiffEmbedder:
                 out.append(self._zero.clone())
             else:
                 chunk_embs = flat_embs[idx : idx + k]
-                out.append(pool_file_chunks_maxmean(chunk_embs))
+                out.append(self._pool_chunks(chunk_embs))
                 idx += k
         return torch.stack(out, dim=0)
 

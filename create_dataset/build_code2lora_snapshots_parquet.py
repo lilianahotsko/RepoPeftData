@@ -251,6 +251,15 @@ def main() -> None:
     v2_train = pq.read_table(v2 / "train.parquet", memory_map=True)
     print(f"  v2 train rows = {v2_train.num_rows}", flush=True)
 
+    # Infer embedding dim from the data (encoder-agnostic; 2048 for Qwen3,
+    # 5376 for harrier-27b, etc.) for accurate README provenance.
+    embed_dim = EMBED_DIM
+    if "repo_state_embedding" in v2_train.schema.names and v2_train.num_rows:
+        first = v2_train.column("repo_state_embedding")[0].as_py()
+        if first is not None:
+            embed_dim = len(first)
+    print(f"  repo_state_embedding dim = {embed_dim}", flush=True)
+
     anchor = _select_anchor_rows(v2_train)
     print(f"  train (anchors): {anchor.num_rows}", flush=True)
     p = out_dir / "commits" / "train.parquet"
@@ -325,7 +334,7 @@ def main() -> None:
         "base_qna_dir": str(base_qna),
         "train_qnas_json": str(train_json),
         "out_dir": str(out_dir),
-        "embed_dim": EMBED_DIM,
+        "embed_dim": embed_dim,
         "splits": summary,
     }
     (out_dir / "SNAPSHOTS_README.json").write_text(

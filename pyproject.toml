@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "c2l"
+version = "0.1.0"
+description = "Code2LoRA: turn any repo into a portable LoRA adapter for a frozen code LLM, no per-user training."
+readme = "c2l/README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+dependencies = [
+    "torch>=2.3",
+    "transformers>=4.45",
+    "accelerate>=0.34",
+    "peft>=0.11",
+    "safetensors>=0.4",
+    "huggingface_hub>=0.25",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+# Run an adapter on a low-VRAM / no-GPU base via bitsandbytes 4-/8-bit.
+quant = ["bitsandbytes>=0.43"]
+# Local Gradio app.
+app = ["gradio>=5.0,<6", "matplotlib>=3.7"]
+# Hosted FastAPI service + generation worker.
+api = ["fastapi>=0.110", "uvicorn>=0.29", "pydantic>=2"]
+# Higher-fidelity CodeBLEU scoring.
+metrics = ["codebleu>=0.7"]
+# Friendly YAML config parsing (a built-in fallback exists without it).
+yaml = ["pyyaml>=6"]
+
+[project.scripts]
+c2l = "c2l.cli:main"
+
+[tool.setuptools]
+packages = ["c2l", "c2l.tasks", "c2l.api"]
+
+[tool.setuptools.package-data]
+c2l = ["c2l.yaml"]

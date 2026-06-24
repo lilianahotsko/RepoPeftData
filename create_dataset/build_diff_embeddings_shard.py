@@ -50,7 +50,10 @@ from transformers import AutoModel, AutoTokenizer
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 sys.path.insert(0, str(ROOT))
-from hypernetwork.train_code2lora_gru_commits import DiffEmbedder  # noqa: E402
+from hypernetwork.train_code2lora_gru_commits import (  # noqa: E402
+    DIFF_POOLING_MODES,
+    DiffEmbedder,
+)
 
 
 DEFAULT_INPUT_DIR = "/scratch/lhotsko/REPO_DATASET/commit_parquet_hf/commits"
@@ -115,6 +118,10 @@ def main() -> None:
     ap.add_argument("--shard-index", type=int, default=0)
     ap.add_argument("--shard-total", type=int, default=1)
     ap.add_argument("--model-name", default=DEFAULT_MODEL)
+    ap.add_argument("--pooling", default="maxmean", choices=list(DIFF_POOLING_MODES),
+                    help="Per/across-chunk pooling. 'maxmean' (default, Qwen3 "
+                         "recipe -> 2*hidden) or 'lasttoken' (decoder-embedder "
+                         "recipe: last-token + L2-norm -> hidden).")
     ap.add_argument("--chunk-tokens", type=int, default=512)
     ap.add_argument("--chunk-overlap", type=int, default=64)
     ap.add_argument("--max-length", type=int, default=512)
@@ -123,6 +130,11 @@ def main() -> None:
     ap.add_argument("--diff-batch", type=int, default=64,
                     help="Number of diffs grouped per embed_diffs_batched() call.")
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--dtype", default="float32",
+                    choices=["float32", "bfloat16", "float16", "auto"],
+                    help="Model load dtype. Keep float32 for the small Qwen3 "
+                         "encoder (reproducibility); use bfloat16/auto for "
+                         "large models (e.g. harrier-27b) so they fit in GPU mem.")
     ap.add_argument("--limit", type=int, default=0,
                     help="Smoke test: stop after this many diffs across all splits.")
     args = ap.parse_args()
@@ -144,9 +156,12 @@ def main() -> None:
 
     # 2) Load model.
     device = args.device if (args.device != "cuda" or torch.cuda.is_available()) else "cpu"
-    print(f"Loading {args.model_name} on {device} ...", flush=True)
+    torch_dtype = {"float32": torch.float32, "bfloat16": torch.bfloat16,
+                   "float16": torch.float16, "auto": "auto"}[args.dtype]
+    print(f"Loading {args.model_name} on {device} (dtype={args.dtype}, "
+          f"pooling={args.pooling}) ...", flush=True)
     tokenizer = AutoTokenizer.from_pretrained(args.model_name)
-    model = AutoModel.from_pretrained(args.model_name).to(device)
+    model = AutoModel.from_pretrained(args.model_name, torch_dtype=torch_dtype).to(device)
     model.eval()
     embedder = DiffEmbedder(
         model=model,
@@ -156,8 +171,9 @@ def main() -> None:
         overlap=args.chunk_overlap,
         max_length=args.max_length,
         batch_size=args.batch_size,
+        pooling=args.pooling,
     )
-    embed_dim = embedder.embed_dim  # 2 * D = 2048 for Qwen3-Embedding-0.6B
+    embed_dim = embedder.embed_dim  # 2*D=2048 (Qwen3 maxmean) or D=5376 (harrier lasttoken)
     print(f"  embed_dim = {embed_dim}", flush=True)
 
     # 3) Per-split processing.

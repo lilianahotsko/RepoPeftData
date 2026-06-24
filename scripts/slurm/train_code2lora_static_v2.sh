@@ -28,7 +28,12 @@ export TRANSFORMERS_CACHE="${TRANSFORMERS_CACHE:-$HF_HOME/hub}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
 SNAPSHOTS_DIR="${SNAPSHOTS_DIR:-$SCRATCH/REPO_DATASET/code2lora_snapshots_hf}"
-SUFFIX="${SUFFIX:-h100_v2_static_3ep}"
+# Hypernetwork-size ablation knob: head trunk width. The base model is held
+# fixed (Qwen2.5-Coder-1.5B), so this is the only capacity axis for the static
+# variant (no GRU here). Fold it into SUFFIX so each size lands in its own
+# OUT_DIR and sweep runs never collide.
+HEAD_HIDDEN="${HEAD_HIDDEN:-1024}"
+SUFFIX="${SUFFIX:-h100_v2_static_3ep_h${HEAD_HIDDEN}}"
 OUT_DIR="$CKPT_DIR/CODE2LORA_STATIC/${SUFFIX}"
 mkdir -p "$OUT_DIR"
 
@@ -62,6 +67,7 @@ fi
 echo "===== Train: Code2LoRA static v2 ====="
 echo "Snapshots dir : $SNAPSHOTS_DIR"
 echo "Output dir    : $OUT_DIR"
+echo "Head hidden   : $HEAD_HIDDEN"
 echo "Epochs / LR   : $EPOCHS / $LR"
 echo "Seed          : $SEED"
 echo "Start         : $(date)"
@@ -70,7 +76,7 @@ python hypernetwork/train_code2lora_static_v2.py \
     --snapshots-dir "$SNAPSHOTS_DIR" \
     --output-dir "$OUT_DIR" \
     --model-name Qwen/Qwen2.5-Coder-1.5B \
-    --rank 16 --alpha 32 --head-hidden-dim 1024 \
+    --rank 16 --alpha 32 --head-hidden-dim "$HEAD_HIDDEN" \
     --epochs "$EPOCHS" --lr "$LR" \
     --max-seq-len "$MAX_SEQ_LEN" \
     --lm-micro-batch "$LM_MICRO_BATCH" \

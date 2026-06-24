@@ -157,6 +157,7 @@ def train_one_repo(
     max_grad_norm: float = 1.0,
     per_step_input: str = "diff",
     rng: random.Random,
+    task_to_idx: Optional[Dict[str, int]] = None,
 ) -> Tuple[float, int, int]:
     """One pass over the chronological commit list of a single repo.
 
@@ -203,26 +204,30 @@ def train_one_repo(
 
         # ctx = output_norm(h_T)  -- gru.output_norm matches eval path.
         ctx = gru.output_norm(h[-1])
-        head_out = head(ctx)
-        inject_lora_weights(base_model, specs, head_out, batch_index=0)
-
-        prefixes = [p["prefix"] for p in pairs]
-        targets = [p["target"] for p in pairs]
         repo_loss = 0.0
         repo_tokens = 0
-        for i in range(0, len(prefixes), lm_micro_batch):
-            j = min(i + lm_micro_batch, len(prefixes))
-            batch = _tokenize_lm_batch(tokenizer, prefixes[i:j], targets[i:j],
-                                       max_seq_len=max_seq_len)
-            if not batch:
-                continue
-            batch = {k: v.to(device) for k, v in batch.items()}
-            out = base_model(**batch)
-            ntok = (batch["labels"] != -100).sum().item()
-            loss = out.loss * ntok
-            loss.backward(retain_graph=True)
-            repo_loss += loss.detach().item()
-            repo_tokens += ntok
+        # Multi-task: inject a task-conditioned adapter per task group so a
+        # single commit can train several tasks. Single-task runs collapse to
+        # one group with task_id=None (identical to the original behaviour).
+        for task_name, task_pairs in _by_task(pairs).items():
+            tid = task_to_idx.get(task_name) if task_to_idx else None
+            head_out = head(ctx, task_id=tid)
+            inject_lora_weights(base_model, specs, head_out, batch_index=0)
+            prefixes = [p["prefix"] for p in task_pairs]
+            targets = [p["target"] for p in task_pairs]
+            for i in range(0, len(prefixes), lm_micro_batch):
+                j = min(i + lm_micro_batch, len(prefixes))
+                batch = _tokenize_lm_batch(tokenizer, prefixes[i:j], targets[i:j],
+                                           max_seq_len=max_seq_len)
+                if not batch:
+                    continue
+                batch = {k: v.to(device) for k, v in batch.items()}
+                out = base_model(**batch)
+                ntok = (batch["labels"] != -100).sum().item()
+                loss = out.loss * ntok
+                loss.backward(retain_graph=True)
+                repo_loss += loss.detach().item()
+                repo_tokens += ntok
         if repo_tokens > 0:
             torch.nn.utils.clip_grad_norm_(
                 list(gru.parameters()) + list(head.parameters()),
@@ -268,6 +273,7 @@ def evaluate_suite(
     in_repo_splits_to_score: Optional[List[str]] = None,
     max_repos: int = 0,
     per_step_input: str = "diff",
+    task_to_idx: Optional[Dict[str, int]] = None,
 ) -> Dict[str, Any]:
     """Per-commit eval loss across one suite. For 'cr_*' suites we score
     every commit; for 'ir_*' we score commits whose in_repo_split matches
@@ -301,23 +307,25 @@ def evaluate_suite(
             if len(pairs) > max_qna_per_commit:
                 pairs = pairs[:max_qna_per_commit]
             ctx = gru.output_norm(h[-1])
-            head_out = head(ctx)
-            inject_lora_weights(base_model, specs, head_out, batch_index=0)
-            prefixes = [p["prefix"] for p in pairs]
-            targets = [p["target"] for p in pairs]
             commit_loss = 0.0
             commit_tokens = 0
-            for i in range(0, len(prefixes), lm_micro_batch):
-                j = min(i + lm_micro_batch, len(prefixes))
-                batch = _tokenize_lm_batch(tokenizer, prefixes[i:j], targets[i:j],
-                                           max_seq_len=max_seq_len)
-                if not batch:
-                    continue
-                batch = {k: v.to(device) for k, v in batch.items()}
-                out = base_model(**batch)
-                ntok = (batch["labels"] != -100).sum().item()
-                commit_loss += out.loss.item() * ntok
-                commit_tokens += ntok
+            for task_name, task_pairs in _by_task(pairs).items():
+                tid = task_to_idx.get(task_name) if task_to_idx else None
+                head_out = head(ctx, task_id=tid)
+                inject_lora_weights(base_model, specs, head_out, batch_index=0)
+                prefixes = [p["prefix"] for p in task_pairs]
+                targets = [p["target"] for p in task_pairs]
+                for i in range(0, len(prefixes), lm_micro_batch):
+                    j = min(i + lm_micro_batch, len(prefixes))
+                    batch = _tokenize_lm_batch(tokenizer, prefixes[i:j], targets[i:j],
+                                               max_seq_len=max_seq_len)
+                    if not batch:
+                        continue
+                    batch = {k: v.to(device) for k, v in batch.items()}
+                    out = base_model(**batch)
+                    ntok = (batch["labels"] != -100).sum().item()
+                    commit_loss += out.loss.item() * ntok
+                    commit_tokens += ntok
             if commit_tokens > 0:
                 per_commit.append({
                     "repo_id": row.repo_id,
@@ -346,11 +354,20 @@ def evaluate_suite(
 # Main
 # ---------------------------------------------------------------------------
 
+def _by_task(pairs: List[Dict[str, str]]) -> Dict[str, List[Dict[str, str]]]:
+    """Group a commit's QnA pairs by their task id (preserving order)."""
+    out: Dict[str, List[Dict[str, str]]] = {}
+    for p in pairs:
+        out.setdefault(p.get("task", "assert_rhs"), []).append(p)
+    return out
+
+
 def _group_qnas_by_key(rows) -> Dict[Tuple[str, str], List[Dict[str, str]]]:
     out: Dict[Tuple[str, str], List[Dict[str, str]]] = {}
     for qr in rows:
         out.setdefault((qr.repo_id, qr.commit_sha), []).append({
             "prefix": qr.prefix, "target": qr.target,
+            "task": getattr(qr, "task", "assert_rhs"),
         })
     return out
 
@@ -376,6 +393,12 @@ def main() -> None:
     # head + gru
     ap.add_argument("--rank", type=int, default=16)
     ap.add_argument("--alpha", type=float, default=32.0)
+    ap.add_argument("--tasks", nargs="+", default=["assert_rhs"],
+                    help="Task ids in stable index order. >1 enables the "
+                         "task-conditioned (multi-task) head; the QnA parquet's "
+                         "'task' column selects each example's task.")
+    ap.add_argument("--task-dim", type=int, default=64,
+                    help="Task-embedding width when multi-task is enabled.")
     ap.add_argument("--head-hidden-dim", type=int, default=1024)
     ap.add_argument("--gru-hidden-dim", type=int, default=2048)
 
@@ -470,11 +493,19 @@ def main() -> None:
         repo_state_dim=repo_dim,
         hidden_dim=args.gru_hidden_dim,
     ).to(device)
+    # Multi-task: more than one task id enables the head's task embedding.
+    # A single task keeps num_tasks=0 -> byte-identical to the original head.
+    task_to_idx = {t: i for i, t in enumerate(args.tasks)}
+    num_tasks = len(args.tasks) if len(args.tasks) > 1 else 0
+    if num_tasks:
+        print(f"  multi-task head: {args.tasks} -> {task_to_idx}", flush=True)
     head = Code2LoRAHead(
         input_dim=args.gru_hidden_dim,
         type_dims=type_dims,
         hidden_dim=args.head_hidden_dim,
         rank=args.rank,
+        num_tasks=num_tasks,
+        task_dim=args.task_dim,
     ).to(device)
 
     # ---- Optim ----
@@ -541,6 +572,7 @@ def main() -> None:
                 max_grad_norm=args.max_grad_norm,
                 per_step_input=args.per_step_input,
                 rng=rng,
+                task_to_idx=task_to_idx,
             )
             repos_done += 1
             avg = sum_loss / max(ntok, 1) if ntok else 0.0
@@ -600,6 +632,7 @@ def _save_ckpt(out_dir: Path, gru: CommitGRU, head: Code2LoRAHead,
 def _do_eval(args, base_model, gru, head, specs, tokenizer, eval_suites,
              device, out_dir, metrics_log, *, best_eval_ref,
              epoch, repos_done, end_of_epoch: bool = False) -> None:
+    task_to_idx = {t: i for i, t in enumerate(getattr(args, "tasks", ["assert_rhs"]))}
     suite_metrics: Dict[str, Any] = {}
     for name, s in eval_suites.items():
         m = evaluate_suite(
@@ -614,6 +647,7 @@ def _do_eval(args, base_model, gru, head, specs, tokenizer, eval_suites,
             in_repo_splits_to_score=s["in_repo_splits_to_score"],
             max_repos=args.limit_eval_repos,
             per_step_input=args.per_step_input,
+            task_to_idx=task_to_idx,
         )
         # Write per-commit JSON for decay-curve plotting.
         out = out_dir / f"eval_per_commit_{name}_repos{repos_done}.json"

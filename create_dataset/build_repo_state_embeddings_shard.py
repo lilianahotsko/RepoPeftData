@@ -51,17 +51,28 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
-from transformers import AutoModel, AutoTokenizer
+import torch.nn.functional as F
+from transformers import AutoConfig, AutoModel, AutoTokenizer
 
 
-# ---- Constants (must match canonical recipe) ----
-MODEL_NAME = "Qwen/Qwen3-Embedding-0.6B"
+# ---- Defaults / runtime config (overridable via CLI in main()) ----
+# These are module-level so the embedding helpers can read them after main()
+# resolves the chosen encoder + pooling. EMBED_DIM (per-file hidden) and
+# REPO_DIM (per-snapshot vector) are derived from the model config + pooling.
+DEFAULT_MODEL_NAME = "Qwen/Qwen3-Embedding-0.6B"
+MODEL_NAME = DEFAULT_MODEL_NAME
+POOLING = "maxmean"  # "maxmean" (Qwen3 recipe) | "lasttoken" (decoder embedder)
 CHUNK_TOKENS = 2048
 CHUNK_OVERLAP = 256
 MAX_FILE_BYTES = 2_000_000
 MIN_WINDOW_TOKENS = 8
-EMBED_DIM = 1024  # per-file
-REPO_DIM = 2 * EMBED_DIM  # 2048
+EMBED_DIM = 1024  # per-file hidden (set from model config in main())
+REPO_DIM = 2 * EMBED_DIM  # per-snapshot: 2*hidden (maxmean) or hidden (lasttoken)
+
+
+def _repo_dim_for(hidden: int, pooling: str) -> int:
+    """Per-snapshot embedding dim given per-file hidden size and pooling."""
+    return hidden if pooling == "lasttoken" else 2 * hidden
 
 REPOS_ROOTS = (
     "/scratch/lhotsko/REPO_DATASET/repositories",
@@ -120,7 +131,10 @@ def _cat_file_blob(repo_path: Path, blob_sha: str) -> bytes:
 @torch.inference_mode()
 def _embed_blob_text(text: str, tokenizer, model, device,
                      batch_size: int = 8) -> np.ndarray | None:
-    """Tokenize -> chunk -> attention-mean -> avg chunk vecs. -> [1024] fp32."""
+    """Tokenize -> chunk -> per-chunk pool -> avg chunk vecs -> [hidden] fp32.
+
+    Per-chunk pooling follows ``POOLING``: masked-mean ('maxmean') or
+    last-token + L2-norm ('lasttoken', decoder-embedder recipe)."""
     ids = tokenizer.encode(text, add_special_tokens=False)
     if not ids:
         return None
@@ -145,11 +159,24 @@ def _embed_blob_text(text: str, tokenizer, model, device,
         enc = {k: v.to(device) for k, v in enc.items()}
         out = model(**enc)
         last = out.last_hidden_state
-        mask = enc["attention_mask"].unsqueeze(-1).to(last.dtype)
-        denom = mask.sum(dim=1).clamp(min=1)
-        mean = ((last * mask).sum(dim=1) / denom).detach().to(torch.float32).cpu()
-        chunk_vecs.append(mean)
-    return torch.cat(chunk_vecs, dim=0).mean(dim=0).numpy()
+        if POOLING == "lasttoken":
+            am = enc["attention_mask"]
+            T = am.shape[1]
+            ar = torch.arange(T, device=am.device)
+            pos = torch.where(am.bool(), ar, torch.full_like(ar, -1))
+            last_idx = pos.max(dim=1).values.clamp(min=0)
+            vec = last[torch.arange(last.shape[0], device=last.device), last_idx]
+            vec = F.normalize(vec.float(), dim=-1).detach().cpu()
+            chunk_vecs.append(vec)
+        else:
+            mask = enc["attention_mask"].unsqueeze(-1).to(last.dtype)
+            denom = mask.sum(dim=1).clamp(min=1)
+            mean = ((last * mask).sum(dim=1) / denom).detach().to(torch.float32).cpu()
+            chunk_vecs.append(mean)
+    file_vec = torch.cat(chunk_vecs, dim=0).mean(dim=0)
+    if POOLING == "lasttoken":
+        file_vec = F.normalize(file_vec, dim=-1)
+    return file_vec.numpy()
 
 
 def _read_blob_cache(cache_dir: Path) -> Tuple[Dict[str, int], np.ndarray | None]:
@@ -182,6 +209,7 @@ def _process_repo(
     cache_root: Path,
     tokenizer, model, device,
     *,
+    blob_batch: int = 8,
     log_every_blobs: int = 200,
 ) -> Dict[str, np.ndarray]:
     """Return {commit_sha: 2048-d fp32 vec} for every commit in needed_shas.
@@ -236,7 +264,8 @@ def _process_repo(
                 text = _cat_file_blob(repo_path, blob).decode("utf-8", errors="ignore")
             except Exception:
                 text = ""
-            vec = _embed_blob_text(text, tokenizer, model, device) if text else None
+            vec = _embed_blob_text(text, tokenizer, model, device,
+                                   batch_size=blob_batch) if text else None
             if vec is None:
                 vec = np.zeros(EMBED_DIM, dtype=np.float32)
             new_vecs.append(vec.astype(np.float16))
@@ -259,16 +288,19 @@ def _process_repo(
         all_arr = cached_arr
         sha_to_idx = cached_idx
 
-    # Pool to 2048-d per missing snapshot.
+    # Pool to REPO_DIM-d per missing snapshot.
     for sha, files in per_snap_files.items():
         idxs = [sha_to_idx[b] for b, _p, _sz in files if b in sha_to_idx]
         if not idxs:
             cached_snaps[sha] = np.zeros(REPO_DIM, dtype=np.float32)
             continue
         sub = all_arr[idxs].astype(np.float32)
-        mean_pool = sub.mean(axis=0)
-        max_pool = sub.max(axis=0)
-        repo_vec = np.concatenate([mean_pool, max_pool], axis=0)
+        if POOLING == "lasttoken":
+            # Mean of L2-normalized per-file vectors, renormalized -> [hidden].
+            repo_vec = sub.mean(axis=0)
+        else:
+            # concat(mean_files, max_files) -> [2*hidden].
+            repo_vec = np.concatenate([sub.mean(axis=0), sub.max(axis=0)], axis=0)
         norm = np.linalg.norm(repo_vec) + 1e-12
         repo_vec /= norm
         cached_snaps[sha] = repo_vec.astype(np.float32)
@@ -304,17 +336,46 @@ def _list_all_repos(input_dir: Path, splits: List[str]) -> Dict[str, str]:
 
 
 def main() -> None:
+    # Declared global up front (before the argparser reads CHUNK_TOKENS /
+    # CHUNK_OVERLAP as defaults) so we can rebind them from CLI below.
+    global MODEL_NAME, POOLING, CHUNK_TOKENS, CHUNK_OVERLAP, EMBED_DIM, REPO_DIM
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--input-dir", default=DEFAULT_INPUT_DIR)
     ap.add_argument("--out-dir", default=DEFAULT_OUT_DIR)
-    ap.add_argument("--cache-root", default=DEFAULT_CACHE_ROOT)
+    ap.add_argument("--cache-root", default=DEFAULT_CACHE_ROOT,
+                    help="Per-blob embedding cache root. Use a DISTINCT dir per "
+                         "encoder (the cache stores model-specific vectors).")
+    ap.add_argument("--model-name", default=DEFAULT_MODEL_NAME)
+    ap.add_argument("--pooling", default="maxmean",
+                    choices=["maxmean", "lasttoken"],
+                    help="'maxmean' (Qwen3 recipe -> 2*hidden) or 'lasttoken' "
+                         "(decoder-embedder recipe: last-token+L2 -> hidden).")
+    ap.add_argument("--dtype", default="float32",
+                    choices=["float32", "bfloat16", "float16", "auto"],
+                    help="Model load dtype; use bfloat16/auto for large models.")
+    ap.add_argument("--chunk-tokens", type=int, default=CHUNK_TOKENS)
+    ap.add_argument("--chunk-overlap", type=int, default=CHUNK_OVERLAP)
+    ap.add_argument("--blob-batch", type=int, default=8,
+                    help="Per-forward chunk batch size when embedding blobs. "
+                         "Lower it for large models at long chunk lengths.")
     ap.add_argument("--splits", nargs="+",
                     default=["train", "cr_val", "cr_test"])
     ap.add_argument("--shard-index", type=int, default=0)
     ap.add_argument("--shard-total", type=int, default=1)
     ap.add_argument("--device", default="cuda")
     args = ap.parse_args()
+
+    # Resolve runtime config into module globals consumed by the embed helpers.
+    MODEL_NAME = args.model_name
+    POOLING = args.pooling
+    CHUNK_TOKENS = args.chunk_tokens
+    CHUNK_OVERLAP = args.chunk_overlap
+    cfg = AutoConfig.from_pretrained(MODEL_NAME)
+    EMBED_DIM = int(cfg.hidden_size)
+    REPO_DIM = _repo_dim_for(EMBED_DIM, POOLING)
+    print(f"Encoder={MODEL_NAME} pooling={POOLING} hidden={EMBED_DIM} "
+          f"repo_dim={REPO_DIM}", flush=True)
 
     input_dir = Path(args.input_dir)
     out_dir = Path(args.out_dir)
@@ -376,13 +437,17 @@ def main() -> None:
             cached_snaps = _read_cached_snapshots(cache_dir)
             missing = [s for s in needed if s not in cached_snaps]
             if missing and model is None:
-                print(f"Loading {MODEL_NAME} on {device} (first missing blob) ...",
-                      flush=True)
+                torch_dtype = {"float32": torch.float32, "bfloat16": torch.bfloat16,
+                               "float16": torch.float16, "auto": "auto"}[args.dtype]
+                print(f"Loading {MODEL_NAME} on {device} (dtype={args.dtype}, "
+                      f"first missing blob) ...", flush=True)
                 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-                model = AutoModel.from_pretrained(MODEL_NAME).to(device)
+                model = AutoModel.from_pretrained(
+                    MODEL_NAME, torch_dtype=torch_dtype).to(device)
                 model.eval()
             snap_map = _process_repo(
                 repo_id, needed, cache_root, tokenizer, model, device,
+                blob_batch=args.blob_batch,
             )
             for sha, idx in rows:
                 emb = snap_map.get(sha)
