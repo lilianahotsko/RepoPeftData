@@ -45,6 +45,12 @@ COMMITS_DIR="${COMMITS_DIR:-$SCRATCH/REPO_DATASET/commit_parquet_hf_v2}"
 QNAS_DIR="${QNAS_DIR:-$SCRATCH/REPO_DATASET/code2lora_snapshots_hf}"
 SUITES_STR="${SUITES:-ir_val ir_test cr_val cr_test}"
 read -r -a SUITES <<< "$SUITES_STR"
+# Task-index order used at TRAINING time. Single-task checkpoints keep the
+# default (a no-op). Multi-task checkpoints (e.g. c2l_evo_multitask) MUST pass
+# the same order so each QnA's 'task' column selects the right task embedding,
+# e.g. TASKS="assert_rhs qa".
+TASKS_STR="${TASKS:-assert_rhs}"
+read -r -a TASKS_ARR <<< "$TASKS_STR"
 NUM_SHARDS="${NUM_SHARDS:-4}"
 SUFFIX="${SUFFIX:-h100_v2_gru_3ep_best}"
 OUT_DIR="$CKPT_DIR/CODE2LORA_GRU_EVAL_V2/${SUFFIX}"
@@ -55,6 +61,9 @@ MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-64}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
 QNAS_PER_COMMIT_LIMIT="${QNAS_PER_COMMIT_LIMIT:-8}"
 BOOTSTRAP="${BOOTSTRAP:-5000}"
+# Optional: dump per-QnA predictions (question/target/prediction + metrics) as
+# JSONL for qualitative inspection. Set PREDICTIONS_OUT to enable.
+PREDICTIONS_OUT="${PREDICTIONS_OUT:-}"
 
 IDX="${SLURM_ARRAY_TASK_ID:-0}"
 N_SUITES=${#SUITES[@]}
@@ -67,11 +76,17 @@ if [ "$SUITE_I" -ge "$N_SUITES" ]; then
 fi
 SUITE="${SUITES[$SUITE_I]}"
 
+PRED_ARGS=()
+if [ -n "$PREDICTIONS_OUT" ]; then
+    PRED_ARGS+=(--predictions-out "${PREDICTIONS_OUT%.jsonl}_${SUITE}_shard${SHARD_I}of${NUM_SHARDS}.jsonl")
+fi
+
 echo "===== Eval v2 GRU SHARDED  task ${IDX}/${N_TASKS} ====="
 echo "Checkpoint    : $CKPT"
 echo "Base model    : $BASE_MODEL"
 echo "Suite         : $SUITE (suite_i=$SUITE_I)"
 echo "Shard         : $SHARD_I of $NUM_SHARDS"
+echo "Tasks         : ${TASKS_ARR[*]}"
 echo "Commits dir   : $COMMITS_DIR"
 echo "QnAs dir      : $QNAS_DIR"
 echo "Output dir    : $OUT_DIR"
@@ -85,12 +100,14 @@ python evaluation/run_code2lora_gru_v2_eval.py \
     --qnas-dir "$QNAS_DIR" \
     --suite "$SUITE" \
     --output-dir "$OUT_DIR" \
+    --tasks "${TASKS_ARR[@]}" \
     --max-input-tokens "$MAX_INPUT_TOKENS" \
     --max-new-tokens "$MAX_NEW_TOKENS" \
     --batch-size "$BATCH_SIZE" \
     --qnas-per-commit-limit "$QNAS_PER_COMMIT_LIMIT" \
     --bootstrap "$BOOTSTRAP" \
     --shard-i "$SHARD_I" \
-    --num-shards "$NUM_SHARDS"
+    --num-shards "$NUM_SHARDS" \
+    "${PRED_ARGS[@]}"
 
 echo "Done: $(date)"

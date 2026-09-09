@@ -24,6 +24,7 @@ import json
 import math
 import os
 import random
+import re
 import sys
 import time
 from pathlib import Path
@@ -38,7 +39,7 @@ from transformers import (
     get_cosine_schedule_with_warmup,
 )
 
-from peft import LoraConfig, get_peft_model
+from peft import LoraConfig, PeftModel, get_peft_model
 
 _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
@@ -86,6 +87,9 @@ def main() -> None:
     ap.add_argument("--num-workers", type=int, default=2)
     ap.add_argument("--seed", type=int, default=3407)
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--resume-adapter", default=None,
+                    help="Path to an existing PEFT adapter dir (e.g. "
+                         "adapter-16000) to continue training from.")
     args = ap.parse_args()
 
     out_dir = Path(args.output_dir)
@@ -115,7 +119,17 @@ def main() -> None:
         bias="none",
         task_type="CAUSAL_LM",
     )
-    model = get_peft_model(base, lora_cfg)
+    resume_step = 0
+    if args.resume_adapter:
+        resume_path = Path(args.resume_adapter).expanduser().resolve()
+        print(f"Resuming LoRA weights from {resume_path} ...", flush=True)
+        model = PeftModel.from_pretrained(base, str(resume_path), is_trainable=True)
+        m = re.search(r"adapter-(\d+)$", resume_path.name)
+        if m:
+            resume_step = int(m.group(1))
+        print(f"  resume_step={resume_step}", flush=True)
+    else:
+        model = get_peft_model(base, lora_cfg)
     model.print_trainable_parameters()
 
     print(f"Loading QnAs from {args.qna_parquet} ...", flush=True)
@@ -141,7 +155,11 @@ def main() -> None:
     sched = get_cosine_schedule_with_warmup(optim, warmup_steps, total_steps)
     print(f"  total_steps={total_steps}  warmup={warmup_steps}", flush=True)
 
-    global_step = 0
+    global_step = resume_step
+    # Fast-forward the LR schedule to the resume point so we don't restart
+    # cosine from step 0 (optimizer state is not restored).
+    for _ in range(resume_step):
+        sched.step()
     t0 = time.time()
     for epoch in range(args.epochs):
         model.train()
@@ -149,6 +167,8 @@ def main() -> None:
         running_tok = 0
         optim.zero_grad(set_to_none=True)
         for it, batch in enumerate(loader):
+            if global_step >= total_steps:
+                break
             if not batch:
                 continue
             batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
@@ -177,6 +197,10 @@ def main() -> None:
                     p = out_dir / f"adapter-{global_step}"
                     model.save_pretrained(p)
                     print(f"  [ckpt] -> {p}", flush=True)
+            if global_step >= total_steps:
+                break
+        if global_step >= total_steps:
+            break
         ep_dir = out_dir / f"adapter-ep{epoch}"
         model.save_pretrained(ep_dir)
         print(f"  [ckpt] end of epoch -> {ep_dir}", flush=True)

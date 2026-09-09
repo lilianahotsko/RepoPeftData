@@ -401,6 +401,14 @@ def main() -> None:
                     help="Task-embedding width when multi-task is enabled.")
     ap.add_argument("--head-hidden-dim", type=int, default=1024)
     ap.add_argument("--gru-hidden-dim", type=int, default=2048)
+    ap.add_argument("--init-checkpoint", default=None,
+                    help="Warm-start GRU + head from this gru_head.*.pt before "
+                         "training. The head is grown to the current --tasks: "
+                         "task-embedding rows are added (existing tasks copied) "
+                         "and the trunk's first layer is column-padded so the "
+                         "loaded behaviour is byte-identical at init. Use this to "
+                         "finetune a single-task checkpoint into a multi-task one "
+                         "(e.g. assert_rhs -> assert_rhs+qa).")
 
     # optim
     ap.add_argument("--epochs", type=int, default=3)
@@ -508,6 +516,10 @@ def main() -> None:
         task_dim=args.task_dim,
     ).to(device)
 
+    # ---- Optional warm-start (finetune a prior checkpoint) ----
+    if args.init_checkpoint:
+        warm_start_from_checkpoint(args.init_checkpoint, gru, head, device)
+
     # ---- Optim ----
     optim = torch.optim.AdamW(
         list(gru.parameters()) + list(head.parameters()),
@@ -608,6 +620,88 @@ def main() -> None:
         best_eval = min(best_eval, metrics_log[-1]["eval_loss"])
 
     print(f"\nDone. Best primary eval = {best_eval:.4f}", flush=True)
+
+
+def warm_start_from_checkpoint(
+    path: str, gru: CommitGRU, head: Code2LoRAHead, device: torch.device,
+) -> None:
+    """Load weights from a prior ``gru_head.*.pt`` into ``gru``/``head``,
+    growing the head to the current task configuration.
+
+    The GRU is loaded as-is (dims must match). The head is loaded
+    parameter-by-parameter so a *smaller* task configuration can warm-start a
+    *larger* one without shape errors:
+
+      * ``task_embedding.weight``: existing task rows are copied into the first
+        rows of the (possibly larger) embedding; new task rows keep their fresh
+        small-normal init. If the source had no task embedding (single-task),
+        the whole table keeps its fresh init.
+      * ``trunk.0.weight``: the source columns are copied into the leading
+        ``input_dim`` columns and the trailing ``task_dim`` columns (which feed
+        the task embedding) are zero-initialised. With zeros there, the loaded
+        head reproduces the source head's output exactly at init for every task,
+        so a single-task checkpoint finetunes into multi-task without disturbing
+        the original task's behaviour.
+
+    Every other parameter is copied verbatim when shapes match.
+    """
+    ckpt = torch.load(path, map_location="cpu", weights_only=False)
+    src_hc = ckpt.get("head_config", {})
+    print(f"  [warm-start] loading {path}", flush=True)
+    print(f"    source head_config: num_tasks={src_hc.get('num_tasks')} "
+          f"task_dim={src_hc.get('task_dim')} hidden={src_hc.get('hidden_dim')}; "
+          f"target: num_tasks={head.num_tasks} task_dim={head.task_dim} "
+          f"hidden={head.hidden_dim}", flush=True)
+
+    # ---- GRU (strict; recurrence dims must match) ----
+    g_missing, g_unexpected = gru.load_state_dict(ckpt["gru_state"], strict=False)
+    if g_missing or g_unexpected:
+        raise RuntimeError(
+            f"GRU warm-start shape/key mismatch (the source GRU must match "
+            f"--gru-hidden-dim / --per-step-input). missing={g_missing} "
+            f"unexpected={g_unexpected}")
+
+    # ---- Head (grow-friendly) ----
+    src = ckpt["head_state"]
+    tgt = head.state_dict()
+    new_state: Dict[str, torch.Tensor] = {}
+    copied, grown, kept_init = [], [], []
+    for k, v in tgt.items():
+        sv = src.get(k)
+        if k == "task_embedding.weight":
+            if sv is not None and sv.shape[1] == v.shape[1] and sv.shape[0] <= v.shape[0]:
+                w = v.clone()
+                w[: sv.shape[0]] = sv
+                new_state[k] = w
+                grown.append(k)
+            else:
+                new_state[k] = v
+                kept_init.append(k)
+            continue
+        if sv is None:
+            new_state[k] = v
+            kept_init.append(k)
+            continue
+        if sv.shape == v.shape:
+            new_state[k] = sv
+            copied.append(k)
+        elif (k == "trunk.0.weight" and sv.dim() == 2 and v.dim() == 2
+              and sv.shape[0] == v.shape[0] and sv.shape[1] <= v.shape[1]):
+            w = v.clone()
+            w.zero_()
+            w[:, : sv.shape[1]] = sv
+            new_state[k] = w
+            grown.append(k)
+        else:
+            new_state[k] = v
+            kept_init.append(k)
+            print(f"    [warn] shape mismatch on {k}: src{tuple(sv.shape)} "
+                  f"vs tgt{tuple(v.shape)} -> keeping fresh init", flush=True)
+    head.load_state_dict(new_state, strict=True)
+    gru.to(device)
+    head.to(device)
+    print(f"    copied={len(copied)} grown={grown} kept_init={len(kept_init)}",
+          flush=True)
 
 
 def _save_ckpt(out_dir: Path, gru: CommitGRU, head: Code2LoRAHead,

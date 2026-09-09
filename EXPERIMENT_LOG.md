@@ -711,8 +711,57 @@ Both rows are the **GRU, m=1** variant (only the encoder differs). The default-e
 row needs the GRU m=1 Qwen3 test eval (setting #1, currently "pending" — its checkpoint
 exists at `CODE2LORA_GRU/h100_v2_gru_3ep_h1024_g2048`), so both rows fill in together.
 
+GRU, m=1 (h1024_g2048). Qwen3 row = `h100_v2_gru_3ep_best_sharded`; harrier row =
+`gru_harrier27b` (job 16536967).
+
 | Encoder | Params | Emb dim | CR EM | CR ES | CR CB | IR EM | IR ES | IR CB |
 |---------|--------|---------|-------|-------|-------|-------|-------|-------|
-| Qwen3-Embedding-0.6B (default) | 0.6B | 2048 | | | | | | |
-| harrier-oss-v1-27b | 27B | 5376 | | | | | | |
+| Qwen3-Embedding-0.6B (default) | 0.6B | 2048 | 0.6029 | 0.8100 | 0.7632 | 0.6449 | 0.8284 | 0.7897 |
+| harrier-oss-v1-27b | 27B | 5376 | 0.5907 | 0.8021 | 0.7564 | 0.6408 | 0.8232 | 0.7870 |
+
+Finding: the 27B encoder does **not** improve decoded test metrics over the 0.6B
+embedder at m=1 — it is marginally lower on both suites (CR EM 0.5907 vs 0.6029;
+IR EM 0.6408 vs 0.6449), despite a lower training val-loss. Bigger input features
+alone do not help at fixed hypernet capacity. (m=2 "both" row pending: job 16592663.)
+
+---
+
+## 2026-07-06 — EMNLP demo-paper experiment batch (Code2LoRADemo)
+
+Experiments backing the demo paper (see `Code2LoRADemo/SUBMISSION_PLAN.md`).
+All GPU jobs on `rrg-yuntian`; the CPU benchmark stays on `def-yuntian`
+(no `rrg-yuntian_cpu` membership). An earlier submission of the same batch on
+`def-yuntian` (17225171–17225190) was cancelled and resubmitted on rrg.
+
+| # | Job | What | Account | Depends on |
+|---|-----|------|---------|------------|
+| A | 17225193 (0-23) | Matched-protocol retention eval: MT checkpoint `c2l_evo_multitask`, assert_rhs+qa, cr_test+ir_test → `c2l_evo_mt_assert_matched` | rrg-yuntian_gpu | — |
+| B | 17225194 (0-7)  | 8-bit backend eval, cr_test (Table 3 row) | rrg-yuntian_gpu | — |
+| C | 17225195 (0-11) | 8-bit backend eval, ir_test (Table 3 row) | rrg-yuntian_gpu | — |
+| D | 17225196 | Rehearsal-mix MT finetune on `qna_qa_mix_rehearsal_hf` → `c2l_evo_multitask_rehearsal` | rrg-yuntian_gpu | — |
+| E | 17225197 (0-23) | Rehearsal ckpt: assert retention eval → `c2l_evo_mt_rehearsal_assert` | rrg-yuntian_gpu | afterok D |
+| F | 17225198 (0-7)  | Rehearsal ckpt: QA eval → `c2l_evo_mt_rehearsal_qa` | rrg-yuntian_gpu | afterok D |
+| G | 17225191 | `c2l adapt` CPU timing benchmark (full/incremental/cached) | def-yuntian_cpu | — |
+
+After A/B/C/E/F finish, merge shards with
+`python evaluation/merge_eval_shards.py --auto-detect --input-dir $CKPT_DIR/CODE2LORA_GRU_EVAL_V2/<suffix>`.
+
+Rehearsal mix (`create_dataset/build_qa_rehearsal_mix.py`): QA train set + 10%
+assertion-completion rehearsal sample, streamed via pyarrow, schemas unified
+(`large_string` cast) → `$SCRATCH/REPO_DATASET/qna_qa_mix_rehearsal_hf`.
+
+Qualitative eval (`Code2LoRADemo/human_eval/`): 100 QA answers stratified by
+`qa_quality` quartile, ≤2 per repo (88 repos), sampled from
+`c2l_evo_mt_demo_selection/records_qa_scored.jsonl` with
+`evaluation/build_human_eval_sample.py` (seed 13). Judged blind by
+**LLM-as-judge** (`evaluation/llm_judge_qa.py`; no human annotators):
+gpt-5.4 primary + gpt-5.4-mini secondary, correctness 0/1/2 + grounding 0/1.
+
+- gpt-5.4: 1% correct / 14% partial / 85% incorrect (mean 0.16);
+  top quartile 4%/40%/56% (mean 0.48). Mini nearly identical on correctness
+  (kappa 0.714); grounding diverges (8% vs 33%, kappa 0.30).
+- Judge correctness vs automatic metrics: Spearman 0.28 (`qa_quality`),
+  0.30 (ROUGE-L).
+- Caveat: references written by gpt-5.4-mini with the diff visible; strict
+  reference-based judging. Framing notes in `human_eval/README.md`.
 
