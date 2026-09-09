@@ -677,6 +677,8 @@ def _rag_retrieve_and_compress(
     tokenizer,
     rag_max_context_tokens: int,
     rag_hybrid: bool,
+    prompt_format: str = "plain",
+    repo_id: str = "",
 ) -> str:
     from evaluation.rag_corpus import (
         compress_retrieved_chunks,
@@ -685,14 +687,16 @@ def _rag_retrieve_and_compress(
     )
 
     if not index.get("chunks"):
-        return prefix
+        return (_format_repo_fim_prompt(prefix, "", repo_id)
+                if prompt_format == "repo_fim" else prefix)
     query = prefix[-2000:]
     if rag_hybrid and index.get("bm25") is not None:
         chunks = hybrid_retrieve_topk(query, query_emb, index, top_k)
     else:
         embs = index.get("embeddings")
         if embs is None or embs.numel() == 0:
-            return prefix
+            return (_format_repo_fim_prompt(prefix, "", repo_id)
+                    if prompt_format == "repo_fim" else prefix)
         sims = (query_emb.float() @ embs.T).squeeze(0)
         k = min(top_k, len(index["chunks"]))
         _, top_idx = sims.topk(k)
@@ -700,6 +704,8 @@ def _rag_retrieve_and_compress(
     ctx = compress_retrieved_chunks(
         chunks, prefix, tokenizer, max_tokens=rag_max_context_tokens,
     )
+    if prompt_format == "repo_fim":
+        return _format_repo_fim_prompt(prefix, ctx, repo_id)
     return format_rag_prompt(prefix, ctx)
 
 
@@ -735,9 +741,31 @@ def _drc_key_for_qna(q: Dict[str, Any]) -> str:
            f"::{int(q.get('col_offset', 0))}"
 
 
-def _format_drc_prompt(prefix: str, drc_code: str) -> str:
+def _format_repo_fim_prompt(prefix: str, context: str, repo_id: str) -> str:
+    """Qwen2.5-Coder *native* repository-level completion format.
+
+    Instead of naively prepending retrieved/DRC context (``context + "\\n\\n\\n"
+    + prefix``), which triggers Qwen2.5-Coder's fill-in-the-middle code path
+    (the model emits ``<|fim_suffix|>`` as its first token and collapses), we
+    place the context and the current test file using the ``<|repo_name|>`` /
+    ``<|file_sep|>`` scheme the backbone was pretrained on for repo-level code
+    completion. Generation then continues the current file left-to-right, which
+    is the trained regime for this format.
+    """
+    parts = [f"<|repo_name|>{repo_id}"]
+    if context and context.strip():
+        parts.append(f"<|file_sep|>context.py\n{context}")
+    parts.append(f"<|file_sep|>test.py\n{prefix}")
+    return "\n".join(parts)
+
+
+def _format_drc_prompt(prefix: str, drc_code: str,
+                       prompt_format: str = "plain", repo_id: str = "") -> str:
     if not drc_code:
-        return prefix
+        return (_format_repo_fim_prompt(prefix, "", repo_id)
+                if prompt_format == "repo_fim" else prefix)
+    if prompt_format == "repo_fim":
+        return _format_repo_fim_prompt(prefix, drc_code, repo_id)
     return drc_code + "\n\n\n" + prefix
 
 
@@ -765,6 +793,7 @@ def score_suite(
     prefix_max_tokens: int = 0,
     # ---- Context-injection options (rag / drc) ---------------------------
     context_method: str = "none",   # "none" | "rag" | "drc"
+    prompt_format: str = "plain",   # "plain" | "repo_fim"
     rag_cache_dir: Optional[Path] = None,
     rag_top_k: int = 3,
     rag_embed_model=None,
@@ -967,6 +996,7 @@ def score_suite(
                     top_k=rag_top_k, tokenizer=tokenizer,
                     rag_max_context_tokens=rag_max_context_tokens,
                     rag_hybrid=rag_hybrid,
+                    prompt_format=prompt_format, repo_id=repo_id,
                 ))
         elif context_method == "drc" and drc_contexts:
             for p in pairs:
@@ -979,7 +1009,9 @@ def score_suite(
                     )
                 else:
                     compressed = ""
-                prompts.append(_format_drc_prompt(p["prefix"], compressed))
+                prompts.append(_format_drc_prompt(
+                    p["prefix"], compressed,
+                    prompt_format=prompt_format, repo_id=repo_id))
         else:
             prompts = [p["prefix"] for p in pairs]
 
@@ -1182,6 +1214,17 @@ def main() -> None:
                          "prefix budget (median 224 tok) on commit-derived "
                          "suites so RAG / DRC don't have to compete with a "
                          "much longer prefix for the 4K window. 0 = disabled.")
+    ap.add_argument("--prompt-format", choices=["plain", "repo_fim"],
+                    default="plain",
+                    help="How to lay out injected context for rag/drc. "
+                         "'plain' prepends context + blank lines + prefix "
+                         "(the paper's default). 'repo_fim' uses "
+                         "Qwen2.5-Coder's native repository-level completion "
+                         "format (<|repo_name|> / <|file_sep|>) so retrieved "
+                         "context is placed as the backbone was trained on, "
+                         "avoiding the FIM-degeneracy of naive prepending. "
+                         "Output files are tagged '_fim' so they do not "
+                         "overwrite the plain baseline.")
     ap.add_argument("--max-new-tokens", type=int, default=64)
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--repo-limit", type=int, default=0,
@@ -1343,7 +1386,9 @@ def main() -> None:
             print(f"[suite {suite}] MISSING parquet {qna_path}, skipping",
                   flush=True)
             continue
-        out_path = out_dir / f"baseline_{args.method}_{suite}{shard_suffix}.json"
+        fmt_tag = "_fim" if args.prompt_format == "repo_fim" else ""
+        method_label = f"{args.method}{fmt_tag}"
+        out_path = out_dir / f"baseline_{method_label}_{suite}{shard_suffix}.json"
         s = score_suite(
             qna_path=qna_path, suite_name=suite,
             model=model, tokenizer=tok, device=device,
@@ -1359,6 +1404,7 @@ def main() -> None:
             prefix_max_tokens=args.prefix_max_tokens,
             # Context injection
             context_method=args.method if args.method in ("rag", "drc") else "none",
+            prompt_format=args.prompt_format,
             rag_cache_dir=rag_cache_dir, rag_top_k=args.rag_top_k,
             rag_embed_model=rag_embed_model,
             rag_embed_tokenizer=rag_embed_tokenizer,
@@ -1368,12 +1414,13 @@ def main() -> None:
             drc_cache_dir=drc_cache_dir, drc_max_tokens=args.drc_max_tokens,
             predictions_out=predictions_out,
             restrict_keys=restrict_keys,
-            method_label=args.method,
+            method_label=method_label,
         )
         suite_summaries[suite] = s
 
     # Final cross-suite summary file (per shard; merge later).
-    summary_path = out_dir / f"baseline_{args.method}_summary{shard_suffix}.json"
+    _sum_tag = "_fim" if args.prompt_format == "repo_fim" else ""
+    summary_path = out_dir / f"baseline_{args.method}{_sum_tag}_summary{shard_suffix}.json"
     summary_path.write_text(json.dumps({
         "method": args.method,
         "base_model": args.base_model,

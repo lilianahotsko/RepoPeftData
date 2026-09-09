@@ -63,11 +63,23 @@ def retrieve_chunks(query_emb: torch.Tensor, index: dict, top_k: int = 5) -> lis
     return [index["chunks"][i] for i in top_indices.tolist()]
 
 
-def format_rag_prompt(prefix: str, retrieved_chunks: list[str]) -> str:
+def format_rag_prompt(prefix: str, retrieved_chunks: list[str],
+                      prompt_format: str = "plain", repo: str = "") -> str:
     """
-    Present retrieved code as natural preceding context.
-    No artificial headers -- the model is a code completion model.
+    Present retrieved code as preceding context.
+
+    ``plain`` (default): concatenate chunks then the prefix, no headers -- the
+    model is a code completion model. ``repo_fim``: lay the chunks and the
+    current file out in Qwen2.5-Coder's native repository-level completion format
+    (``<|repo_name|>`` / ``<|file_sep|>``) so retrieved context is placed exactly
+    as the backbone was pretrained on for repo-level completion.
     """
+    if prompt_format == "repo_fim":
+        parts = [f"<|repo_name|>{repo}"]
+        for j, ch in enumerate(retrieved_chunks):
+            parts.append(f"<|file_sep|>context_{j}.py\n{ch}")
+        parts.append(f"<|file_sep|>test.py\n{prefix}")
+        return "\n".join(parts)
     if not retrieved_chunks:
         return prefix
     context = "\n\n\n".join(retrieved_chunks)
@@ -89,6 +101,11 @@ def main():
     ap.add_argument("--model-name", type=str, default="Qwen/Qwen2.5-Coder-1.5B")
     ap.add_argument("--embed-model-name", type=str, default="Qwen/Qwen3-Embedding-0.6B")
     ap.add_argument("--top-k", type=int, default=5, help="Number of chunks to retrieve")
+    ap.add_argument("--prompt-format", choices=["plain", "repo_fim"], default="plain",
+                    help="Context layout: 'plain' prepends chunks + blank lines + "
+                         "prefix (paper default); 'repo_fim' uses Qwen2.5-Coder's "
+                         "native <|repo_name|>/<|file_sep|> repo-level format. "
+                         "Output file is tagged '_fim'.")
     ap.add_argument("--max-new-tokens", type=int, default=128)
     ap.add_argument("--max-input-tokens", type=int, default=16384,
                     help="Max input tokens (Qwen2.5-Coder supports 32K)")
@@ -192,7 +209,8 @@ def main():
         # Move query to CPU for retrieval against cached embeddings
         retrieved = retrieve_chunks(query_emb.cpu(), repo_indices[repo], top_k=args.top_k)
 
-        rag_prompt = format_rag_prompt(prefix, retrieved)
+        rag_prompt = format_rag_prompt(prefix, retrieved,
+                                       prompt_format=args.prompt_format, repo=repo)
 
         prefix_ids = tok.encode(rag_prompt, add_special_tokens=False)
         input_ids = [bos_id] + prefix_ids
@@ -231,8 +249,9 @@ def main():
         # Write after every 50 examples so partial results survive crashes
         if (i + 1) % 50 == 0 or (i + 1) == n:
             n_eval = len(entries)
+            _fim_tag = "_fim" if args.prompt_format == "repo_fim" else ""
             results = {
-                "method": f"rag_top{args.top_k}",
+                "method": f"rag_top{args.top_k}{_fim_tag}",
                 "split": args.split,
                 "exact_match_pct": 100.0 * em_count / n_eval,
                 "exact_match_count": em_count,
@@ -252,7 +271,7 @@ def main():
                 results_path = Path(args.output).expanduser().resolve()
             else:
                 scratch = os.environ.get("SCRATCH", os.path.expanduser("~/scratch"))
-                results_path = Path(scratch) / "BASELINES" / f"rag_top{args.top_k}_{args.split}.json"
+                results_path = Path(scratch) / "BASELINES" / f"rag_top{args.top_k}{_fim_tag}_{args.split}.json"
             results_path.parent.mkdir(parents=True, exist_ok=True)
             results_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
 

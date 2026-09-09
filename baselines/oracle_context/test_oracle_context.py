@@ -42,16 +42,38 @@ def lookup_context(contexts: dict, metadata: dict) -> str:
     return ""
 
 
-def format_oracle_prompt(prefix: str, oracle_code: str, tokenizer=None, max_input_tokens: int = 16384) -> str:
+def _repo_fim_wrap(kept_code: str, prefix: str, repo: str) -> str:
+    """Lay the (budgeted) oracle definitions and the current file out in
+    Qwen2.5-Coder's native repository-level completion format
+    (``<|repo_name|>`` / ``<|file_sep|>``) so injected context is placed as the
+    backbone was pretrained on, avoiding the FIM-degeneracy of naive prepending.
+    Mirrors ``format_rag_prompt(..., prompt_format='repo_fim')``.
+    """
+    parts = [f"<|repo_name|>{repo}"]
+    if kept_code.strip():
+        parts.append(f"<|file_sep|>context.py\n{kept_code}")
+    parts.append(f"<|file_sep|>test.py\n{prefix}")
+    return "\n".join(parts)
+
+
+def format_oracle_prompt(prefix: str, oracle_code: str, tokenizer=None,
+                         max_input_tokens: int = 16384,
+                         prompt_format: str = "plain", repo: str = "") -> str:
     """
     Prepend extracted source code before the test prefix.
     Budget-based: the prefix is always fully preserved. Oracle context
     fills the remaining token budget so it can never hurt vs pretrained.
+
+    ``plain`` (paper default): ``context + blank lines + prefix``. ``repo_fim``:
+    the same budgeted context, but laid out in Qwen2.5-Coder's native
+    ``<|repo_name|>`` / ``<|file_sep|>`` repository-completion format.
     """
     if not oracle_code.strip():
-        return prefix
+        return _repo_fim_wrap("", prefix, repo) if prompt_format == "repo_fim" else prefix
 
     if tokenizer is None:
+        if prompt_format == "repo_fim":
+            return _repo_fim_wrap(oracle_code, prefix, repo)
         return f"{oracle_code}\n\n\n{prefix}"
 
     separator = "\n\n\n"
@@ -60,7 +82,7 @@ def format_oracle_prompt(prefix: str, oracle_code: str, tokenizer=None, max_inpu
     budget = max_input_tokens - prefix_tokens - separator_tokens - 2  # 2 for BOS + safety
 
     if budget <= 50:
-        return prefix
+        return _repo_fim_wrap("", prefix, repo) if prompt_format == "repo_fim" else prefix
 
     # Tokenize oracle definitions individually (they're separated by \n\n\n)
     definitions = oracle_code.split("\n\n\n")
@@ -74,9 +96,12 @@ def format_oracle_prompt(prefix: str, oracle_code: str, tokenizer=None, max_inpu
         used += defn_tokens
 
     if not kept:
-        return prefix
+        return _repo_fim_wrap("", prefix, repo) if prompt_format == "repo_fim" else prefix
 
-    return separator.join(kept) + separator + prefix
+    kept_code = separator.join(kept)
+    if prompt_format == "repo_fim":
+        return _repo_fim_wrap(kept_code, prefix, repo)
+    return kept_code + separator + prefix
 
 
 def main():
@@ -92,6 +117,10 @@ def main():
                     help="Dir with pre-built oracle contexts (from build_context.py)")
     ap.add_argument("--split", type=str, default="cr_test")
     ap.add_argument("--model-name", type=str, default="Qwen/Qwen2.5-Coder-1.5B")
+    ap.add_argument("--prompt-format", choices=["plain", "repo_fim"], default="plain",
+                    help="Context layout: 'plain' prepends context + blank lines + "
+                         "prefix (paper default); 'repo_fim' uses Qwen2.5-Coder's "
+                         "native <|repo_name|>/<|file_sep|> repo-level format.")
     ap.add_argument("--max-new-tokens", type=int, default=128)
     ap.add_argument("--max-input-tokens", type=int, default=16384,
                     help="Max input tokens (Qwen2.5-Coder supports 32K)")
@@ -148,6 +177,25 @@ def main():
     if hasattr(model.config, "use_cache"):
         model.config.use_cache = True
 
+    # Qwen2.5-Coder can enter Fill-In-the-Middle / file-sep / repo-name mode when
+    # code context precedes the prefix, producing a degenerate ``<|fim_suffix|>...``
+    # prediction in the very first slot. Forbid those tokens at decode time
+    # (``bad_words_ids``) so the model is forced into a normal left-to-right
+    # continuation. Mirrors baselines/rag/test_rag.py.
+    _bad_strings = [
+        "<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>", "<|fim_pad|>",
+        "<|file_sep|>", "<|repo_name|>", "<|im_start|>", "<|im_end|>",
+    ]
+    bad_words_ids = []
+    _seen_bad = set()
+    for _t in _bad_strings:
+        _tid = tok.convert_tokens_to_ids(_t)
+        if isinstance(_tid, int) and _tid >= 0 and _tid not in _seen_bad:
+            bad_words_ids.append([_tid])
+            _seen_bad.add(_tid)
+    if not bad_words_ids:
+        bad_words_ids = None
+
     bos_id = get_bos_id(tok)
 
     em_count = 0
@@ -172,7 +220,9 @@ def main():
         if oracle_code:
             n_had_context += 1
 
-        prompt = format_oracle_prompt(prefix, oracle_code, tokenizer=tok, max_input_tokens=args.max_input_tokens)
+        prompt = format_oracle_prompt(prefix, oracle_code, tokenizer=tok,
+                                      max_input_tokens=args.max_input_tokens,
+                                      prompt_format=args.prompt_format, repo=repo)
 
         prefix_ids = tok.encode(prompt, add_special_tokens=False)
         input_ids = [bos_id] + prefix_ids
@@ -185,6 +235,7 @@ def main():
                 input_t, max_new_tokens=args.max_new_tokens,
                 do_sample=False, pad_token_id=tok.pad_token_id,
                 eos_token_id=tok.eos_token_id,
+                bad_words_ids=bad_words_ids,
             )
         gen_ids = out[0][len(input_ids):].tolist()
         pred = tok.decode(gen_ids, skip_special_tokens=True)
@@ -208,7 +259,7 @@ def main():
         if (i + 1) % 50 == 0 or (i + 1) == n:
             n_eval = len(entries)
             _res = {
-                "method": "oracle_context",
+                "method": "oracle_context" + ("_fim" if args.prompt_format == "repo_fim" else ""),
                 "split": args.split,
                 "exact_match_pct": 100.0 * em_count / n_eval,
                 "exact_match_count": em_count,

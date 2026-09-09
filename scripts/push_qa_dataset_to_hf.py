@@ -44,7 +44,7 @@ language:
   - en
 pretty_name: Code2LoRA Question-Answering Dataset (qa task)
 size_categories:
-  - 10K<n<100K
+  - 100K<n<1M
 configs:
   - config_name: qna
     data_files:
@@ -58,27 +58,36 @@ configs:
 
 # Code2LoRA question-answering dataset (`qa` task)
 
-LLM-generated question/answer pairs **about each commit's production-code
-change**. This is the `qa`-task companion to the Code2LoRA-GRU commit dataset:
-every row is keyed by `(repo_id, commit_sha)` and carries the commit's
+LLM-generated question/answer pairs grounded in each training repository's
+commit history. This is the `qa`-task companion to the Code2LoRA-GRU commit
+dataset: every row is keyed by `(repo_id, commit_sha)` and carries the commit's
 `in_repo_split` and `cross_repo_split` labels, so it lines up 1:1 with the GRU
-v2 commit walk and trains alongside the `assert_rhs` / `code_gen` tasks.
+v2 commit walk and trains alongside the `assert_rhs` task.
+
+**164,173 unique pairs** over 9,188 commits from 500 training repositories,
+in two complementary question families (see the `qa_kind` column):
+
+* **`diff`** — 73,829 pairs prompted with the commit's production-code diff
+  (API signature changes, new APIs, behavioral deltas, refactoring rationale).
+* **`repo_state`** — 90,344 pairs prompted with the repository's file contents
+  at that commit (module purpose, function/class behavior, signatures, return
+  values, constants, control flow).
 
 ## How it was built
 
-For every kept commit (non-empty `production_code_diff`) the diff was sent to
-`gpt-5.4-mini` (OpenAI Batch API) with a fixed taxonomy prompt. To keep the set
-balanced and high-quality:
+Questions were generated with `gpt-5.4-mini` (OpenAI Batch API) under a fixed
+per-family taxonomy prompt. To keep the set balanced and high-quality:
 
 * **Per-repo cap (20), split-stratified** — each repo contributes at most 20
   commits, sampled evenly across its chronological timeline, with a reserved
   minimum from the `val`/`test` in-repo splits so ir-eval is never starved.
-* **Diff-size-adaptive question count (3-10)** — tiny diffs get ~3 of the
-  highest-value questions; large refactors get the full 10. Categories are
-  chosen by priority: `intent, behavior_change, scope, new_api,
-  signature_change, usage, refactor, dependency, edge_case, risk`.
-* **4k-token input cap** — diffs are token-trimmed so each request stays within
-  4k input tokens.
+* **Adaptive question count (3-20, median 10)** — the count per family per
+  commit adapts to the diff / repository size; tiny diffs get a few
+  highest-value questions, large changes get the full set.
+* **4k-token input cap** — diffs / file contents are token-trimmed so each
+  request stays within 4k input tokens.
+
+Total generation cost: **$60.15**.
 
 ## Splits
 
@@ -89,7 +98,18 @@ balanced and high-quality:
 | `cr_test` | held-out cross-repo test repos. |
 
 `ir_val` / `ir_test` are not separate files — derive them from `train` via the
-`in_repo_split` column (exactly as the GRU v2 trainer does).
+`in_repo_split` column (exactly as the GRU v2 trainer does). The in-repository
+evaluation splits are a subset of `train`, so the 164,173 total is not inflated
+by counting them twice.
+
+| split (disjoint) | diff | repo_state | total |
+|---|---|---|---|
+| train (in-repo train) | 40,357 | 48,849 | 89,206 |
+| ir_val (in `train`)   |  8,369 | 10,689 | 19,058 |
+| ir_test (in `train`)  |  9,333 | 11,698 | 21,031 |
+| cr_val                |  7,882 |  9,561 | 17,443 |
+| cr_test               |  7,888 |  9,547 | 17,435 |
+| **all**               | **73,829** | **90,344** | **164,173** |
 
 ## Schema (per row)
 
@@ -102,7 +122,8 @@ balanced and high-quality:
 | `in_repo_split` | string | `train` / `val` / `test` |
 | `task` | string | always `qa` |
 | `question_index` | int32 | position within the commit's question set |
-| `category` | string | one of the 10 taxonomy categories |
+| `category` | string | taxonomy category (per family) |
+| `qa_kind` | string | `diff` or `repo_state` |
 | `prefix` | large_string | the question (model prompt) |
 | `target` | large_string | the answer (training target) |
 
@@ -113,6 +134,8 @@ from datasets import load_dataset
 qa = load_dataset("code2lora/code2lora-data-qa", "qna")
 # in-repo eval splits live inside `train`:
 ir_test = qa["train"].filter(lambda r: r["in_repo_split"] == "test")
+# pick a question family:
+diff_qa = qa["train"].filter(lambda r: r["qa_kind"] == "diff")
 ```
 
 Join with the GRU v2 commits on `(repo_id, commit_sha)` to attach
@@ -138,6 +161,11 @@ def _stage(build_dir: Path, staging: Path) -> None:
     dst_qna = staging / "qna"
     dst_qna.mkdir(parents=True, exist_ok=True)
     for pq in sorted(src_qna.glob("*.parquet")):
+        # ir_val / ir_test are subsets of train.parquet (in_repo_split
+        # val/test); skip them so the released total is not double-counted.
+        if pq.name.startswith("ir_"):
+            print(f"[qna] skipping {pq.name} (derivable from train.parquet)", flush=True)
+            continue
         print(f"[qna] staging {pq.name} ...", flush=True)
         shutil.copy2(pq, dst_qna / pq.name)
     (staging / "README.md").write_text(README, encoding="utf-8")
@@ -166,11 +194,11 @@ def main() -> None:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--repo-id", required=True)
     ap.add_argument("--build-dir",
-                    default="/scratch/lhotsko/REPO_DATASET/qna_qa_hf")
+                    default="/scratch/lhotsko/REPO_DATASET/qna_qa_hf_v2")
     ap.add_argument("--token", default=None)
     ap.add_argument("--private", action="store_true")
     ap.add_argument("--commit-message",
-                    default="Initial upload: Code2LoRA QA dataset (~74k pairs).")
+                    default="Full QA dataset: diff + repository-state (164,173 pairs).")
     ap.add_argument("--no-upload", action="store_true")
     args = ap.parse_args()
 

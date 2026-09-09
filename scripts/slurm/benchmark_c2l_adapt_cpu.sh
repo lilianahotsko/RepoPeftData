@@ -70,20 +70,20 @@ for R in "${REPOS[@]}"; do
     git -C "$WORK" checkout -q "HEAD~1"
 
     T0=$(date +%s.%N)
-    c2l adapt "$WORK" --task assert_rhs -o "$OUT" --device cpu --offline \
+    c2l adapt "$WORK" --task assert_rhs -o "$OUT" \
         > "$BENCH_DIR/log_${NAME}_full.txt" 2>&1
     T1=$(date +%s.%N)
     FULL=$(python -c "print($T1-$T0)")
 
     git -C "$WORK" checkout -q "$HEAD_SHA"
     T0=$(date +%s.%N)
-    c2l adapt "$WORK" --task assert_rhs -o "$OUT" --device cpu --offline \
+    c2l adapt "$WORK" --task assert_rhs -o "$OUT" \
         > "$BENCH_DIR/log_${NAME}_incr.txt" 2>&1
     T1=$(date +%s.%N)
     INCR=$(python -c "print($T1-$T0)")
 
     T0=$(date +%s.%N)
-    c2l adapt "$WORK" --task assert_rhs -o "$OUT" --device cpu --offline \
+    c2l adapt "$WORK" --task assert_rhs -o "$OUT" \
         > "$BENCH_DIR/log_${NAME}_cached.txt" 2>&1
     T1=$(date +%s.%N)
     CACHED=$(python -c "print($T1-$T0)")

@@ -35,6 +35,9 @@ CACHE_DIR="${CACHE_DIR:-$SCRATCH/RAG_CHUNK_CACHE}"
 TOP_K="${TOP_K:-3}"
 MAX_INPUT_TOKENS="${MAX_INPUT_TOKENS:-16384}"
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-128}"
+# 'plain' (paper default, FIM-token-banned prepend) or 'repo_fim' (native
+# <|repo_name|>/<|file_sep|> layout). repo_fim tags the output '_repofim'.
+PROMPT_FORMAT="${PROMPT_FORMAT:-plain}"
 
 mkdir -p "$OUT_DIR"
 
@@ -44,7 +47,9 @@ case "${SLURM_ARRAY_TASK_ID:-0}" in
     *) echo "[error] bad SLURM_ARRAY_TASK_ID" >&2; exit 1 ;;
 esac
 
-OUT_JSON="$OUT_DIR/rag_top${TOP_K}_${SPLIT}_fim_ban.json"
+FMT_TAG=""
+if [ "$PROMPT_FORMAT" = "repo_fim" ]; then FMT_TAG="_repofim"; fi
+OUT_JSON="$OUT_DIR/rag_top${TOP_K}${FMT_TAG}_${SPLIT}_fim_ban.json"
 
 echo "===== Re-run V1 RAG (FIM-ban)  split=${SPLIT}  k=${TOP_K} ====="
 echo "Splits dir : $SPLITS_DIR"
@@ -60,6 +65,7 @@ python baselines/rag/test_rag.py \
     --top-k "$TOP_K" \
     --max-input-tokens "$MAX_INPUT_TOKENS" \
     --max-new-tokens "$MAX_NEW_TOKENS" \
+    --prompt-format "$PROMPT_FORMAT" \
     --output "$OUT_JSON"
 
 echo "Done: $(date)"

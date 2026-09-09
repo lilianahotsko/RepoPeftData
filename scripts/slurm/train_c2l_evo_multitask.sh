@@ -2,7 +2,7 @@
 #SBATCH --job-name=c2l_evo_multitask
 #SBATCH --output=slurm_logs/c2l_evo_multitask_%j.out
 #SBATCH --error=slurm_logs/c2l_evo_multitask_%j.err
-#SBATCH --time=24:00:00
+#SBATCH --time=04:00:00
 #SBATCH --gres=gpu:h100:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=128G

@@ -120,6 +120,14 @@ if [ "$PREFIX_MAX_TOKENS" != "0" ]; then
     EXTRA_ARGS+=(--prefix-max-tokens "$PREFIX_MAX_TOKENS")
 fi
 
+# Repo-aware FIM context layout (rebuttal): when PROMPT_FORMAT=repo_fim, rag/drc
+# context is placed in Qwen2.5-Coder's native <|repo_name|>/<|file_sep|> format
+# instead of naive prepending. Output files are tagged '_fim' by the driver.
+PROMPT_FORMAT="${PROMPT_FORMAT:-plain}"
+if [ "$PROMPT_FORMAT" = "repo_fim" ]; then
+    EXTRA_ARGS+=(--prompt-format repo_fim)
+fi
+
 # Context-injection methods (rag / drc).
 if [ "$METHOD" = "rag" ]; then
     RAG_CACHE_DIR="${RAG_CACHE_DIR:-$SCRATCH/RAG_CHUNK_CACHE_AST_COMMITS}"
