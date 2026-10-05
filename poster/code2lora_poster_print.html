@@ -1,0 +1,850 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Code2LoRA: Efficient LLM Adaptation - Conference Poster</title>
+    <style>
+        @page {
+            size: 42in 36in landscape;
+            margin: 0;
+        }
+
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap');
+
+        :root {
+            --primary: #1e40af;
+            --primary-light: #3b82f6;
+            --accent: #6d28d9;
+            --success: #047857;
+            --text-dark: #0f172a;
+            --text-medium: #334155;
+            --text-light: #64748b;
+            --bg-white: #ffffff;
+            --bg-light: #f1f5f9;
+            --border: #cbd5e1;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: #ffffff;
+            color: var(--text-dark);
+            -webkit-print-color-adjust: exact;
+            print-color-adjust: exact;
+        }
+
+        .poster {
+            width: 42in;
+            height: 36in;
+            padding: 0.6in;
+            background: linear-gradient(180deg, #f8fafc 0%, #ffffff 100%);
+            display: grid;
+            grid-template-rows: auto 1fr auto;
+            gap: 0.4in;
+        }
+
+        /* ===== HEADER ===== */
+        .header {
+            background: linear-gradient(135deg, #1e40af 0%, #6d28d9 50%, #7c3aed 100%);
+            border-radius: 24px;
+            padding: 0.5in 0.7in;
+            color: white;
+            display: grid;
+            grid-template-columns: 1fr auto;
+            align-items: center;
+            box-shadow: 0 8px 32px rgba(30, 64, 175, 0.3);
+        }
+
+        .header-left h1 {
+            font-size: 96pt;
+            font-weight: 800;
+            letter-spacing: -2px;
+            margin-bottom: 8pt;
+        }
+
+        .header-left .subtitle {
+            font-size: 36pt;
+            font-weight: 400;
+            opacity: 0.95;
+            margin-bottom: 16pt;
+        }
+
+        .header-left .authors {
+            font-size: 24pt;
+            opacity: 0.85;
+        }
+
+        .header-right {
+            text-align: right;
+        }
+
+        .conference-badge {
+            background: rgba(255,255,255,0.2);
+            padding: 16pt 32pt;
+            border-radius: 16px;
+            font-size: 28pt;
+            font-weight: 600;
+        }
+
+        /* ===== MAIN CONTENT ===== */
+        .content {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 0.35in;
+        }
+
+        .card {
+            background: var(--bg-white);
+            border-radius: 20px;
+            padding: 0.35in;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+            border: 2px solid var(--border);
+        }
+
+        .card-header {
+            display: flex;
+            align-items: center;
+            gap: 16pt;
+            margin-bottom: 20pt;
+            padding-bottom: 16pt;
+            border-bottom: 3px solid var(--bg-light);
+        }
+
+        .card-icon {
+            width: 56pt;
+            height: 56pt;
+            background: linear-gradient(135deg, var(--primary) 0%, var(--accent) 100%);
+            border-radius: 14pt;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 28pt;
+        }
+
+        .card-title {
+            font-size: 28pt;
+            font-weight: 700;
+            color: var(--text-dark);
+        }
+
+        /* ===== MOTIVATION ===== */
+        .motivation-item {
+            display: flex;
+            gap: 14pt;
+            margin-bottom: 18pt;
+            align-items: flex-start;
+        }
+
+        .problem-icon {
+            width: 36pt;
+            height: 36pt;
+            background: #fecaca;
+            border-radius: 8pt;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18pt;
+            flex-shrink: 0;
+        }
+
+        .solution-icon {
+            background: #bbf7d0;
+        }
+
+        .motivation-text {
+            font-size: 18pt;
+            line-height: 1.5;
+            color: var(--text-medium);
+        }
+
+        .motivation-text strong {
+            color: var(--text-dark);
+        }
+
+        /* ===== CONTRIBUTIONS ===== */
+        .contribution {
+            display: flex;
+            gap: 14pt;
+            margin-bottom: 18pt;
+            align-items: flex-start;
+        }
+
+        .contribution-num {
+            width: 36pt;
+            height: 36pt;
+            background: linear-gradient(135deg, var(--primary) 0%, var(--accent) 100%);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: 700;
+            font-size: 18pt;
+            flex-shrink: 0;
+        }
+
+        .contribution-text {
+            font-size: 18pt;
+            line-height: 1.5;
+            color: var(--text-medium);
+        }
+
+        .contribution-text strong {
+            color: var(--primary);
+        }
+
+        /* ===== ARCHITECTURE (spans 2 columns) ===== */
+        .architecture {
+            grid-column: span 2;
+        }
+
+        .arch-flow {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 24pt 0;
+            gap: 8pt;
+        }
+
+        .arch-box {
+            border-radius: 14pt;
+            padding: 20pt 24pt;
+            text-align: center;
+            min-width: 1.6in;
+            border: 3px solid;
+        }
+
+        .arch-box.repo { background: #dbeafe; border-color: #3b82f6; }
+        .arch-box.encoder { background: #fef3c7; border-color: #f59e0b; }
+        .arch-box.hypernetwork { background: #ede9fe; border-color: #8b5cf6; }
+        .arch-box.lora { background: #dcfce7; border-color: #22c55e; }
+        .arch-box.llm { background: #fce7f3; border-color: #ec4899; }
+
+        .arch-label {
+            font-size: 16pt;
+            font-weight: 700;
+            color: var(--text-dark);
+            margin-bottom: 4pt;
+        }
+
+        .arch-desc {
+            font-size: 13pt;
+            color: var(--text-light);
+        }
+
+        .arch-arrow {
+            font-size: 32pt;
+            color: var(--text-light);
+        }
+
+        .equation-box {
+            background: var(--bg-light);
+            border-radius: 12pt;
+            padding: 20pt;
+            margin: 20pt 0;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 18pt;
+            text-align: center;
+            border-left: 6pt solid var(--primary);
+        }
+
+        .variants-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 16pt;
+        }
+
+        .variant-box {
+            background: var(--bg-light);
+            border-radius: 12pt;
+            padding: 18pt;
+        }
+
+        .variant-title {
+            font-size: 17pt;
+            font-weight: 600;
+            color: var(--primary);
+            margin-bottom: 8pt;
+        }
+
+        .variant-desc {
+            font-size: 15pt;
+            color: var(--text-medium);
+            line-height: 1.4;
+        }
+
+        .badge {
+            display: inline-block;
+            background: linear-gradient(135deg, var(--primary) 0%, var(--accent) 100%);
+            color: white;
+            font-size: 12pt;
+            font-weight: 600;
+            padding: 4pt 12pt;
+            border-radius: 20pt;
+            margin-left: 8pt;
+        }
+
+        /* ===== RESULTS TABLE ===== */
+        .results {
+            grid-column: span 2;
+        }
+
+        .results-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 17pt;
+        }
+
+        .results-table th {
+            background: var(--bg-light);
+            padding: 14pt 12pt;
+            text-align: left;
+            font-weight: 600;
+            border-bottom: 3pt solid var(--border);
+        }
+
+        .results-table td {
+            padding: 14pt 12pt;
+            border-bottom: 1pt solid var(--border);
+        }
+
+        .highlight-row {
+            background: linear-gradient(90deg, rgba(30, 64, 175, 0.08) 0%, rgba(109, 40, 217, 0.08) 100%);
+        }
+
+        .highlight-row td {
+            font-weight: 600;
+        }
+
+        .em-value {
+            font-weight: 700;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 18pt;
+        }
+
+        .em-best { color: var(--success); }
+        .em-bad { color: #dc2626; }
+
+        /* ===== BENCHMARK STATS ===== */
+        .benchmark-stats {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 14pt;
+            margin-bottom: 20pt;
+        }
+
+        .stat-box {
+            background: var(--bg-light);
+            border-radius: 12pt;
+            padding: 18pt;
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 40pt;
+            font-weight: 800;
+            background: linear-gradient(135deg, var(--primary) 0%, var(--accent) 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .stat-label {
+            font-size: 13pt;
+            color: var(--text-light);
+            margin-top: 4pt;
+        }
+
+        .eval-settings {
+            margin-top: 16pt;
+        }
+
+        .eval-item {
+            font-size: 16pt;
+            color: var(--text-medium);
+            margin-bottom: 10pt;
+            line-height: 1.4;
+        }
+
+        .eval-item strong {
+            color: var(--primary);
+        }
+
+        /* ===== VISUAL BARS ===== */
+        .comparison-bars {
+            margin-top: 16pt;
+        }
+
+        .bar-item {
+            margin-bottom: 16pt;
+        }
+
+        .bar-label {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 6pt;
+            font-size: 16pt;
+        }
+
+        .bar-name { font-weight: 500; }
+        .bar-value { 
+            font-weight: 700; 
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .bar-track {
+            height: 28pt;
+            background: var(--bg-light);
+            border-radius: 14pt;
+            overflow: hidden;
+        }
+
+        .bar-fill {
+            height: 100%;
+            border-radius: 14pt;
+        }
+
+        .bar-fill.code2lora {
+            background: linear-gradient(90deg, var(--primary) 0%, var(--accent) 100%);
+        }
+
+        .bar-fill.fft { background: #06b6d4; }
+        .bar-fill.pretrained { background: #94a3b8; }
+        .bar-fill.rag { background: #f97316; }
+
+        /* ===== FOOTER ===== */
+        .footer {
+            display: grid;
+            grid-template-columns: 2fr 2fr 1fr;
+            gap: 0.35in;
+        }
+
+        .footer-card {
+            background: var(--bg-white);
+            border-radius: 20px;
+            padding: 0.3in;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+            border: 2px solid var(--border);
+        }
+
+        .footer-title {
+            font-size: 22pt;
+            font-weight: 700;
+            margin-bottom: 16pt;
+            color: var(--text-dark);
+        }
+
+        .finding {
+            display: flex;
+            gap: 12pt;
+            margin-bottom: 14pt;
+            font-size: 17pt;
+            color: var(--text-medium);
+        }
+
+        .finding-icon {
+            color: var(--success);
+            font-size: 18pt;
+        }
+
+        .insight-text {
+            font-size: 17pt;
+            color: var(--text-medium);
+            line-height: 1.5;
+        }
+
+        .insight-text strong {
+            color: var(--text-dark);
+        }
+
+        .qr-section {
+            text-align: center;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .qr-box {
+            width: 1.5in;
+            height: 1.5in;
+            background: var(--bg-light);
+            border: 3pt dashed var(--border);
+            border-radius: 16pt;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 12pt;
+            font-size: 14pt;
+            color: var(--text-light);
+        }
+
+        .qr-label {
+            font-size: 15pt;
+            color: var(--text-medium);
+        }
+
+        .qr-url {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 13pt;
+            color: var(--text-light);
+        }
+
+        @media print {
+            body { background: white; }
+            .poster { 
+                box-shadow: none;
+                -webkit-print-color-adjust: exact;
+                print-color-adjust: exact;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="poster">
+        <!-- HEADER -->
+        <header class="header">
+            <div class="header-left">
+                <h1>Code2LoRA</h1>
+                <p class="subtitle">Repository-Aware Adapter Generation via Composable Hypernetworks</p>
+                <p class="authors">Efficient LLM Adaptation for Repository-Level Code Understanding</p>
+            </div>
+            <div class="header-right">
+                <div class="conference-badge">EMNLP 2025</div>
+            </div>
+        </header>
+
+        <!-- MAIN CONTENT -->
+        <main class="content">
+            <!-- Motivation -->
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-icon">🎯</div>
+                    <h2 class="card-title">Motivation</h2>
+                </div>
+                
+                <div class="motivation-item">
+                    <div class="problem-icon">✗</div>
+                    <div class="motivation-text">
+                        <strong>Context Window Limits</strong><br>
+                        RAG and ICL bounded by context length; add latency per query
+                    </div>
+                </div>
+                
+                <div class="motivation-item">
+                    <div class="problem-icon">✗</div>
+                    <div class="motivation-text">
+                        <strong>Per-Repo Training</strong><br>
+                        Traditional LoRA requires retraining for each new repository
+                    </div>
+                </div>
+                
+                <div class="motivation-item">
+                    <div class="problem-icon">✗</div>
+                    <div class="motivation-text">
+                        <strong>Linear Inference Cost</strong><br>
+                        Cost scales with retrieved context size
+                    </div>
+                </div>
+                
+                <div class="motivation-item">
+                    <div class="problem-icon solution-icon">✓</div>
+                    <div class="motivation-text">
+                        <strong>Our Solution</strong><br>
+                        Distill repository knowledge into adapter <em>parameters</em> — zero tokens at inference
+                    </div>
+                </div>
+            </div>
+
+            <!-- Key Contributions -->
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-icon">💡</div>
+                    <h2 class="card-title">Contributions</h2>
+                </div>
+                
+                <div class="contribution">
+                    <div class="contribution-num">1</div>
+                    <div class="contribution-text">
+                        <strong>Code2LoRA</strong> — First hypernetwork for generating repo-conditioned LoRA adapters for code LLMs
+                    </div>
+                </div>
+                
+                <div class="contribution">
+                    <div class="contribution-num">2</div>
+                    <div class="contribution-text">
+                        <strong>Two architectures</strong> — Direct-projection & shared-basis with 8.5× parameter reduction
+                    </div>
+                </div>
+                
+                <div class="contribution">
+                    <div class="contribution-num">3</div>
+                    <div class="contribution-text">
+                        <strong>RepoPeftBench</strong> — New benchmark: 560 Python repos, 73K assertion completion tasks
+                    </div>
+                </div>
+                
+                <div class="contribution">
+                    <div class="contribution-num">4</div>
+                    <div class="contribution-text">
+                        <strong>+18pp improvement</strong> over pretrained baselines on cross-repo evaluation
+                    </div>
+                </div>
+            </div>
+
+            <!-- Architecture -->
+            <div class="card architecture">
+                <div class="card-header">
+                    <div class="card-icon">🏗️</div>
+                    <h2 class="card-title">Architecture Overview</h2>
+                </div>
+                
+                <div class="arch-flow">
+                    <div class="arch-box repo">
+                        <div class="arch-label">📁 Repository</div>
+                        <div class="arch-desc">Source Files</div>
+                    </div>
+                    <div class="arch-arrow">→</div>
+                    <div class="arch-box encoder">
+                        <div class="arch-label">🔢 Encoder</div>
+                        <div class="arch-desc">Qwen3-Embed</div>
+                    </div>
+                    <div class="arch-arrow">→</div>
+                    <div class="arch-box hypernetwork">
+                        <div class="arch-label">🧠 Hypernetwork</div>
+                        <div class="arch-desc">MLP + Output Heads</div>
+                    </div>
+                    <div class="arch-arrow">→</div>
+                    <div class="arch-box lora">
+                        <div class="arch-label">🔧 LoRA Weights</div>
+                        <div class="arch-desc">A, B Matrices</div>
+                    </div>
+                    <div class="arch-arrow">→</div>
+                    <div class="arch-box llm">
+                        <div class="arch-label">🤖 Qwen2.5-Coder</div>
+                        <div class="arch-desc">Frozen + LoRA</div>
+                    </div>
+                </div>
+
+                <div class="equation-box">
+                    e<sub>repo</sub> = [ Σ<sub>i</sub> w<sub>i</sub> · f<sub>i</sub> ; max<sub>i</sub> f<sub>i</sub> ] ∈ ℝ<sup>2d</sup>  →  H<sub>θ</sub>(e<sub>repo</sub>) = (A, B)  →  W' = W + BA
+                </div>
+
+                <div class="variants-grid">
+                    <div class="variant-box">
+                        <div class="variant-title">Direct-Projection Variant</div>
+                        <div class="variant-desc">
+                            Maps repository embeddings to full LoRA matrices via per-module-type output heads with learnable scaling factors
+                        </div>
+                    </div>
+                    <div class="variant-box">
+                        <div class="variant-title">Shared-Basis Variant <span class="badge">8.5× fewer params</span></div>
+                        <div class="variant-desc">
+                            Generates per-layer mixing coefficients over learnable basis vectors, enabling parameter-efficient adapter generation
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Results Table -->
+            <div class="card results">
+                <div class="card-header">
+                    <div class="card-icon">🏆</div>
+                    <h2 class="card-title">Main Results — Cross-Repo Evaluation</h2>
+                </div>
+                
+                <table class="results-table">
+                    <thead>
+                        <tr>
+                            <th>Method</th>
+                            <th>CR Exact Match (%)</th>
+                            <th>Edit Similarity</th>
+                            <th>CodeBLEU</th>
+                            <th>Extra Tokens</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Pretrained (Qwen2.5-Coder-1.5B)</td>
+                            <td class="em-value">45.7</td>
+                            <td>0.605</td>
+                            <td>0.646</td>
+                            <td>0</td>
+                        </tr>
+                        <tr>
+                            <td>RAG (k=3)</td>
+                            <td class="em-value em-bad">39.7</td>
+                            <td>0.516</td>
+                            <td>0.555</td>
+                            <td>~1,500</td>
+                        </tr>
+                        <tr>
+                            <td>In-Context Learning (3-shot)</td>
+                            <td class="em-value em-bad">42.2</td>
+                            <td>0.559</td>
+                            <td>0.617</td>
+                            <td>~1,200</td>
+                        </tr>
+                        <tr>
+                            <td>Oracle Context</td>
+                            <td class="em-value">47.5</td>
+                            <td>0.614</td>
+                            <td>0.649</td>
+                            <td>~500</td>
+                        </tr>
+                        <tr>
+                            <td>Full Fine-Tuning</td>
+                            <td class="em-value">51.4</td>
+                            <td>0.695</td>
+                            <td>0.678</td>
+                            <td>0</td>
+                        </tr>
+                        <tr class="highlight-row">
+                            <td><strong>Code2LoRA (Ours)</strong></td>
+                            <td class="em-value em-best">63.8</td>
+                            <td>0.784</td>
+                            <td>0.777</td>
+                            <td>0</td>
+                        </tr>
+                        <tr class="highlight-row">
+                            <td><strong>Code2LoRA-PAW (Ours)</strong></td>
+                            <td class="em-value em-best">64.1</td>
+                            <td>0.785</td>
+                            <td>0.779</td>
+                            <td>0</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Benchmark -->
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-icon">📊</div>
+                    <h2 class="card-title">RepoPeftBench</h2>
+                </div>
+                
+                <div class="benchmark-stats">
+                    <div class="stat-box">
+                        <div class="stat-value">560</div>
+                        <div class="stat-label">Python Repos</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-value">73K</div>
+                        <div class="stat-label">Assertion Tasks</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-value">58</div>
+                        <div class="stat-label">CR Test Repos</div>
+                    </div>
+                </div>
+
+                <div class="eval-settings">
+                    <div class="eval-item">
+                        <strong>Cross-Repo (CR):</strong> 58 repos entirely held out — tests generalization to unseen codebases
+                    </div>
+                    <div class="eval-item">
+                        <strong>In-Repo (IR):</strong> Different test functions from seen repos — tests within-repo transfer
+                    </div>
+                </div>
+            </div>
+
+            <!-- Visual Comparison -->
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-icon">📈</div>
+                    <h2 class="card-title">CR Performance</h2>
+                </div>
+                
+                <div class="comparison-bars">
+                    <div class="bar-item">
+                        <div class="bar-label">
+                            <span class="bar-name">Code2LoRA</span>
+                            <span class="bar-value" style="color: var(--success);">63.8%</span>
+                        </div>
+                        <div class="bar-track">
+                            <div class="bar-fill code2lora" style="width: 100%;"></div>
+                        </div>
+                    </div>
+                    
+                    <div class="bar-item">
+                        <div class="bar-label">
+                            <span class="bar-name">Full Fine-Tuning</span>
+                            <span class="bar-value">51.4%</span>
+                        </div>
+                        <div class="bar-track">
+                            <div class="bar-fill fft" style="width: 80.6%;"></div>
+                        </div>
+                    </div>
+                    
+                    <div class="bar-item">
+                        <div class="bar-label">
+                            <span class="bar-name">Pretrained</span>
+                            <span class="bar-value">45.7%</span>
+                        </div>
+                        <div class="bar-track">
+                            <div class="bar-fill pretrained" style="width: 71.6%;"></div>
+                        </div>
+                    </div>
+                    
+                    <div class="bar-item">
+                        <div class="bar-label">
+                            <span class="bar-name">RAG (k=3)</span>
+                            <span class="bar-value" style="color: #f97316;">39.7%</span>
+                        </div>
+                        <div class="bar-track">
+                            <div class="bar-fill rag" style="width: 62.2%;"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+
+        <!-- FOOTER -->
+        <footer class="footer">
+            <div class="footer-card">
+                <div class="footer-title">🔬 Key Findings</div>
+                <div class="finding">
+                    <span class="finding-icon">✓</span>
+                    <span><strong>+18.1 percentage points</strong> over pretrained baseline on cross-repo evaluation</span>
+                </div>
+                <div class="finding">
+                    <span class="finding-icon">✓</span>
+                    <span>Context-based methods (RAG, ICL) underperform — retrieval noise hurts assertion completion</span>
+                </div>
+                <div class="finding">
+                    <span class="finding-icon">✓</span>
+                    <span>Parametric adaptation via hypernetworks outperforms input-space context injection</span>
+                </div>
+                <div class="finding">
+                    <span class="finding-icon">✓</span>
+                    <span>Shared-basis (PAW) achieves comparable accuracy with <strong>8.5× fewer parameters</strong></span>
+                </div>
+            </div>
+            
+            <div class="footer-card">
+                <div class="footer-title">💭 Key Insight</div>
+                <p class="insight-text">
+                    Repository knowledge should be <strong>internalized</strong> into model parameters rather than injected as context. For assertion completion, targets depend heavily on <em>local</em> test context — retrieved chunks consume token budget without providing direct benefit and can shift model attention away from relevant context.
+                </p>
+                <p class="insight-text" style="margin-top: 14pt;">
+                    <strong>Efficiency:</strong> Single forward pass generates adapters in &lt;10ms per repository with zero inference token overhead.
+                </p>
+            </div>
+            
+            <div class="footer-card qr-section">
+                <div class="footer-title">📎 Resources</div>
+                <div class="qr-box">[QR Code]</div>
+                <div class="qr-label">Code & Benchmark</div>
+                <div class="qr-url">github.com/code2lora</div>
+            </div>
+        </footer>
+    </div>
+</body>
+</html>

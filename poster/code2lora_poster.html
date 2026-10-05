@@ -1,0 +1,889 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Code2LoRA: Efficient LLM Adaptation via Hypernetworks</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary: #2563eb;
+            --primary-dark: #1d4ed8;
+            --accent: #7c3aed;
+            --success: #059669;
+            --warning: #d97706;
+            --text-dark: #1e293b;
+            --text-medium: #475569;
+            --text-light: #64748b;
+            --bg-light: #f8fafc;
+            --bg-card: #ffffff;
+            --border: #e2e8f0;
+            --gradient-1: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            --gradient-2: linear-gradient(135deg, #2563eb 0%, #7c3aed 100%);
+            --shadow-sm: 0 1px 2px rgba(0,0,0,0.05);
+            --shadow-md: 0 4px 6px -1px rgba(0,0,0,0.1);
+            --shadow-lg: 0 10px 15px -3px rgba(0,0,0,0.1);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--bg-light);
+            color: var(--text-dark);
+            line-height: 1.6;
+        }
+
+        .poster {
+            width: 1200px;
+            min-height: 1600px;
+            margin: 0 auto;
+            background: var(--bg-light);
+            padding: 40px;
+        }
+
+        /* Header */
+        .header {
+            background: var(--gradient-2);
+            border-radius: 20px;
+            padding: 40px 50px;
+            margin-bottom: 30px;
+            color: white;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .header::before {
+            content: '';
+            position: absolute;
+            top: -50%;
+            right: -10%;
+            width: 400px;
+            height: 400px;
+            background: rgba(255,255,255,0.1);
+            border-radius: 50%;
+        }
+
+        .header::after {
+            content: '';
+            position: absolute;
+            bottom: -30%;
+            left: 20%;
+            width: 300px;
+            height: 300px;
+            background: rgba(255,255,255,0.05);
+            border-radius: 50%;
+        }
+
+        .title {
+            font-size: 48px;
+            font-weight: 800;
+            line-height: 1.1;
+            margin-bottom: 12px;
+            position: relative;
+            z-index: 1;
+        }
+
+        .subtitle {
+            font-size: 26px;
+            font-weight: 400;
+            opacity: 0.95;
+            margin-bottom: 20px;
+            position: relative;
+            z-index: 1;
+        }
+
+        .authors {
+            font-size: 18px;
+            opacity: 0.9;
+            position: relative;
+            z-index: 1;
+        }
+
+        /* Main Grid */
+        .main-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr 1fr;
+            gap: 25px;
+        }
+
+        /* Cards */
+        .card {
+            background: var(--bg-card);
+            border-radius: 16px;
+            padding: 28px;
+            box-shadow: var(--shadow-md);
+            border: 1px solid var(--border);
+        }
+
+        .card-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+
+        .card-icon {
+            width: 44px;
+            height: 44px;
+            background: var(--gradient-2);
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 22px;
+        }
+
+        .card-title {
+            font-size: 22px;
+            font-weight: 700;
+            color: var(--text-dark);
+        }
+
+        /* Motivation Section */
+        .motivation-item {
+            display: flex;
+            gap: 14px;
+            margin-bottom: 18px;
+            align-items: flex-start;
+        }
+
+        .motivation-icon {
+            width: 32px;
+            height: 32px;
+            background: #fee2e2;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+            font-size: 16px;
+        }
+
+        .motivation-icon.solution {
+            background: #dcfce7;
+        }
+
+        .motivation-text {
+            font-size: 15px;
+            color: var(--text-medium);
+            line-height: 1.5;
+        }
+
+        .motivation-text strong {
+            color: var(--text-dark);
+        }
+
+        /* Key Contributions */
+        .contribution {
+            display: flex;
+            gap: 14px;
+            margin-bottom: 16px;
+            align-items: flex-start;
+        }
+
+        .contribution-num {
+            width: 28px;
+            height: 28px;
+            background: var(--gradient-2);
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: 700;
+            font-size: 14px;
+            flex-shrink: 0;
+        }
+
+        .contribution-text {
+            font-size: 15px;
+            color: var(--text-medium);
+        }
+
+        .contribution-text strong {
+            color: var(--primary);
+        }
+
+        /* Architecture Diagram */
+        .architecture {
+            grid-column: span 2;
+        }
+
+        .arch-flow {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 20px 0;
+        }
+
+        .arch-box {
+            background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%);
+            border: 2px solid #0ea5e9;
+            border-radius: 12px;
+            padding: 18px 22px;
+            text-align: center;
+            min-width: 140px;
+        }
+
+        .arch-box.encoder {
+            background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+            border-color: #f59e0b;
+        }
+
+        .arch-box.hypernetwork {
+            background: linear-gradient(135deg, #ede9fe 0%, #ddd6fe 100%);
+            border-color: #8b5cf6;
+        }
+
+        .arch-box.lora {
+            background: linear-gradient(135deg, #dcfce7 0%, #bbf7d0 100%);
+            border-color: #22c55e;
+        }
+
+        .arch-box.llm {
+            background: linear-gradient(135deg, #fce7f3 0%, #fbcfe8 100%);
+            border-color: #ec4899;
+        }
+
+        .arch-label {
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--text-dark);
+            margin-bottom: 4px;
+        }
+
+        .arch-desc {
+            font-size: 11px;
+            color: var(--text-light);
+        }
+
+        .arch-arrow {
+            font-size: 24px;
+            color: var(--text-light);
+        }
+
+        /* Results Table */
+        .results-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+            margin-top: 10px;
+        }
+
+        .results-table th {
+            background: var(--bg-light);
+            padding: 12px 10px;
+            text-align: left;
+            font-weight: 600;
+            border-bottom: 2px solid var(--border);
+            color: var(--text-dark);
+        }
+
+        .results-table td {
+            padding: 11px 10px;
+            border-bottom: 1px solid var(--border);
+            color: var(--text-medium);
+        }
+
+        .results-table tr:last-child td {
+            border-bottom: none;
+        }
+
+        .highlight-row {
+            background: linear-gradient(90deg, rgba(37, 99, 235, 0.08) 0%, rgba(124, 58, 237, 0.08) 100%);
+        }
+
+        .highlight-row td {
+            color: var(--text-dark);
+            font-weight: 600;
+        }
+
+        .em-value {
+            font-weight: 700;
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .em-best {
+            color: var(--success);
+        }
+
+        .em-bad {
+            color: #dc2626;
+        }
+
+        /* Benchmark Stats */
+        .benchmark-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 12px;
+            margin-top: 15px;
+        }
+
+        .stat-box {
+            background: var(--bg-light);
+            border-radius: 10px;
+            padding: 16px;
+            text-align: center;
+        }
+
+        .stat-value {
+            font-size: 28px;
+            font-weight: 800;
+            background: var(--gradient-2);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+
+        .stat-label {
+            font-size: 12px;
+            color: var(--text-light);
+            margin-top: 4px;
+        }
+
+        /* Key Advantages */
+        .advantage {
+            display: flex;
+            gap: 12px;
+            padding: 14px;
+            background: var(--bg-light);
+            border-radius: 10px;
+            margin-bottom: 12px;
+        }
+
+        .advantage-icon {
+            font-size: 24px;
+        }
+
+        .advantage-content h4 {
+            font-size: 15px;
+            font-weight: 600;
+            color: var(--text-dark);
+            margin-bottom: 4px;
+        }
+
+        .advantage-content p {
+            font-size: 13px;
+            color: var(--text-light);
+            line-height: 1.4;
+        }
+
+        /* Comparison */
+        .comparison-bar {
+            margin-bottom: 16px;
+        }
+
+        .bar-label {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 6px;
+            font-size: 13px;
+        }
+
+        .bar-name {
+            font-weight: 500;
+            color: var(--text-dark);
+        }
+
+        .bar-value {
+            font-weight: 700;
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .bar-track {
+            height: 24px;
+            background: var(--bg-light);
+            border-radius: 12px;
+            overflow: hidden;
+        }
+
+        .bar-fill {
+            height: 100%;
+            border-radius: 12px;
+            transition: width 0.5s ease;
+        }
+
+        .bar-fill.code2lora {
+            background: var(--gradient-2);
+        }
+
+        .bar-fill.baseline {
+            background: #94a3b8;
+        }
+
+        .bar-fill.rag {
+            background: #f97316;
+        }
+
+        .bar-fill.fft {
+            background: #06b6d4;
+        }
+
+        /* Footer */
+        .footer {
+            grid-column: span 3;
+            display: flex;
+            gap: 20px;
+            margin-top: 10px;
+        }
+
+        .footer-card {
+            flex: 1;
+            background: var(--bg-card);
+            border-radius: 16px;
+            padding: 24px;
+            box-shadow: var(--shadow-md);
+            border: 1px solid var(--border);
+        }
+
+        .footer-title {
+            font-size: 16px;
+            font-weight: 700;
+            margin-bottom: 12px;
+            color: var(--text-dark);
+        }
+
+        .conclusion-point {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 10px;
+            font-size: 14px;
+            color: var(--text-medium);
+        }
+
+        .conclusion-icon {
+            color: var(--success);
+            font-size: 16px;
+        }
+
+        /* QR Code placeholder */
+        .qr-section {
+            text-align: center;
+        }
+
+        .qr-placeholder {
+            width: 100px;
+            height: 100px;
+            background: var(--bg-light);
+            border: 2px dashed var(--border);
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 10px;
+            font-size: 12px;
+            color: var(--text-light);
+        }
+
+        /* Equation Box */
+        .equation-box {
+            background: var(--bg-light);
+            border-radius: 10px;
+            padding: 16px;
+            margin: 15px 0;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 14px;
+            text-align: center;
+            border-left: 4px solid var(--primary);
+        }
+
+        /* Architecture variants */
+        .variant-box {
+            background: var(--bg-light);
+            border-radius: 10px;
+            padding: 14px;
+            margin-bottom: 12px;
+        }
+
+        .variant-title {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--primary);
+            margin-bottom: 6px;
+        }
+
+        .variant-desc {
+            font-size: 13px;
+            color: var(--text-medium);
+            line-height: 1.4;
+        }
+
+        .badge {
+            display: inline-block;
+            background: var(--gradient-2);
+            color: white;
+            font-size: 11px;
+            font-weight: 600;
+            padding: 3px 8px;
+            border-radius: 20px;
+            margin-left: 8px;
+        }
+    </style>
+</head>
+<body>
+    <div class="poster">
+        <!-- Header -->
+        <header class="header">
+            <h1 class="title">Code2LoRA</h1>
+            <p class="subtitle">Repository-Aware Adapter Generation via Composable Hypernetworks</p>
+            <p class="authors">EMNLP 2025</p>
+        </header>
+
+        <!-- Main Content Grid -->
+        <div class="main-grid">
+            <!-- Motivation -->
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-icon">🎯</div>
+                    <h2 class="card-title">Motivation</h2>
+                </div>
+                
+                <div class="motivation-item">
+                    <div class="motivation-icon">❌</div>
+                    <div class="motivation-text">
+                        <strong>Context Window Limits:</strong> RAG and ICL are bounded by context length, adding latency per query
+                    </div>
+                </div>
+                
+                <div class="motivation-item">
+                    <div class="motivation-icon">❌</div>
+                    <div class="motivation-text">
+                        <strong>Per-Repo Training:</strong> Traditional LoRA requires retraining for each new repository
+                    </div>
+                </div>
+                
+                <div class="motivation-item">
+                    <div class="motivation-icon">❌</div>
+                    <div class="motivation-text">
+                        <strong>Linear Cost:</strong> Inference cost scales with context size
+                    </div>
+                </div>
+                
+                <div class="motivation-item">
+                    <div class="motivation-icon solution">✓</div>
+                    <div class="motivation-text">
+                        <strong>Our Solution:</strong> Distill repository knowledge into adapter <em>parameters</em> via hypernetworks — zero tokens at inference
+                    </div>
+                </div>
+            </div>
+
+            <!-- Key Contributions -->
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-icon">💡</div>
+                    <h2 class="card-title">Key Contributions</h2>
+                </div>
+                
+                <div class="contribution">
+                    <div class="contribution-num">1</div>
+                    <div class="contribution-text">
+                        <strong>Code2LoRA:</strong> First hypernetwork for generating repo-conditioned LoRA adapters for code LLMs
+                    </div>
+                </div>
+                
+                <div class="contribution">
+                    <div class="contribution-num">2</div>
+                    <div class="contribution-text">
+                        <strong>Two architectures:</strong> Direct-projection & shared-basis variants with 8.5× parameter efficiency
+                    </div>
+                </div>
+                
+                <div class="contribution">
+                    <div class="contribution-num">3</div>
+                    <div class="contribution-text">
+                        <strong>RepoPeftBench:</strong> New benchmark of 560 Python repositories with 73K assertion tasks
+                    </div>
+                </div>
+                
+                <div class="contribution">
+                    <div class="contribution-num">4</div>
+                    <div class="contribution-text">
+                        <strong>+18pp over pretrained:</strong> Substantial gains on cross-repo evaluation
+                    </div>
+                </div>
+            </div>
+
+            <!-- Key Advantages -->
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-icon">⚡</div>
+                    <h2 class="card-title">Why Code2LoRA?</h2>
+                </div>
+                
+                <div class="advantage">
+                    <div class="advantage-icon">🚀</div>
+                    <div class="advantage-content">
+                        <h4>Zero-Token Overhead</h4>
+                        <p>Adapters modify weights directly — no retrieved chunks needed at inference</p>
+                    </div>
+                </div>
+                
+                <div class="advantage">
+                    <div class="advantage-icon">🔄</div>
+                    <div class="advantage-content">
+                        <h4>Composable Adapters</h4>
+                        <p>File-level LoRA generation enables incremental updates as code evolves</p>
+                    </div>
+                </div>
+                
+                <div class="advantage">
+                    <div class="advantage-icon">🌐</div>
+                    <div class="advantage-content">
+                        <h4>Cross-Repo Generalization</h4>
+                        <p>Effective adapters for codebases never seen during training</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Architecture -->
+            <div class="card architecture">
+                <div class="card-header">
+                    <div class="card-icon">🏗️</div>
+                    <h2 class="card-title">Architecture Overview</h2>
+                </div>
+                
+                <div class="arch-flow">
+                    <div class="arch-box">
+                        <div class="arch-label">📁 Repository</div>
+                        <div class="arch-desc">Source files</div>
+                    </div>
+                    <div class="arch-arrow">→</div>
+                    <div class="arch-box encoder">
+                        <div class="arch-label">🔢 Encoder</div>
+                        <div class="arch-desc">Qwen3-Embed</div>
+                    </div>
+                    <div class="arch-arrow">→</div>
+                    <div class="arch-box hypernetwork">
+                        <div class="arch-label">🧠 Hypernetwork</div>
+                        <div class="arch-desc">MLP + Heads</div>
+                    </div>
+                    <div class="arch-arrow">→</div>
+                    <div class="arch-box lora">
+                        <div class="arch-label">🔧 LoRA Weights</div>
+                        <div class="arch-desc">A, B matrices</div>
+                    </div>
+                    <div class="arch-arrow">→</div>
+                    <div class="arch-box llm">
+                        <div class="arch-label">🤖 Qwen2.5-Coder</div>
+                        <div class="arch-desc">Frozen + LoRA</div>
+                    </div>
+                </div>
+
+                <div class="equation-box">
+                    e<sub>repo</sub> = [ Σ<sub>i</sub> w<sub>i</sub> · f<sub>i</sub> ; max<sub>i</sub> f<sub>i</sub> ] ∈ ℝ<sup>2d</sup>  →  H<sub>θ</sub>(e<sub>repo</sub>) = (A, B)  →  W' = W + BA
+                </div>
+
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">
+                    <div class="variant-box">
+                        <div class="variant-title">Direct-Projection</div>
+                        <div class="variant-desc">
+                            Maps embeddings to full LoRA matrices via per-module-type output heads with learnable scaling
+                        </div>
+                    </div>
+                    <div class="variant-box">
+                        <div class="variant-title">Shared-Basis (PAW-style) <span class="badge">8.5× fewer params</span></div>
+                        <div class="variant-desc">
+                            Generates per-layer mixing coefficients over learnable basis vectors
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Benchmark -->
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-icon">📊</div>
+                    <h2 class="card-title">RepoPeftBench</h2>
+                </div>
+                
+                <div class="benchmark-grid">
+                    <div class="stat-box">
+                        <div class="stat-value">560</div>
+                        <div class="stat-label">Python Repos</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-value">73K</div>
+                        <div class="stat-label">Assertion Tasks</div>
+                    </div>
+                    <div class="stat-box">
+                        <div class="stat-value">58</div>
+                        <div class="stat-label">CR Test Repos</div>
+                    </div>
+                </div>
+
+                <div style="margin-top: 20px;">
+                    <div style="font-size: 14px; font-weight: 600; margin-bottom: 10px; color: var(--text-dark);">Evaluation Settings</div>
+                    <div style="font-size: 13px; color: var(--text-medium); margin-bottom: 8px;">
+                        <strong style="color: var(--primary);">Cross-Repo (CR):</strong> 58 repos entirely held out — tests generalization to unseen codebases
+                    </div>
+                    <div style="font-size: 13px; color: var(--text-medium);">
+                        <strong style="color: var(--primary);">In-Repo (IR):</strong> Different test functions from seen repos — tests within-repo transfer
+                    </div>
+                </div>
+            </div>
+
+            <!-- Results Table -->
+            <div class="card" style="grid-column: span 2;">
+                <div class="card-header">
+                    <div class="card-icon">🏆</div>
+                    <h2 class="card-title">Main Results — Cross-Repo Evaluation</h2>
+                </div>
+                
+                <table class="results-table">
+                    <thead>
+                        <tr>
+                            <th>Method</th>
+                            <th>CR Exact Match (%)</th>
+                            <th>Edit Similarity</th>
+                            <th>CodeBLEU</th>
+                            <th>Extra Tokens</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr>
+                            <td>Pretrained (Qwen2.5-Coder-1.5B)</td>
+                            <td class="em-value">45.7</td>
+                            <td>0.605</td>
+                            <td>0.646</td>
+                            <td>0</td>
+                        </tr>
+                        <tr>
+                            <td>RAG (k=3)</td>
+                            <td class="em-value em-bad">39.7</td>
+                            <td>0.516</td>
+                            <td>0.555</td>
+                            <td>~1,500</td>
+                        </tr>
+                        <tr>
+                            <td>ICL (3-shot)</td>
+                            <td class="em-value em-bad">42.2</td>
+                            <td>0.559</td>
+                            <td>0.617</td>
+                            <td>~1,200</td>
+                        </tr>
+                        <tr>
+                            <td>Full Fine-Tuning</td>
+                            <td class="em-value">51.4</td>
+                            <td>0.695</td>
+                            <td>0.678</td>
+                            <td>0</td>
+                        </tr>
+                        <tr class="highlight-row">
+                            <td><strong>Code2LoRA (Ours)</strong></td>
+                            <td class="em-value em-best">63.8</td>
+                            <td>0.784</td>
+                            <td>0.777</td>
+                            <td>0</td>
+                        </tr>
+                        <tr class="highlight-row">
+                            <td><strong>Code2LoRA-PAW (Ours)</strong></td>
+                            <td class="em-value em-best">64.1</td>
+                            <td>0.785</td>
+                            <td>0.779</td>
+                            <td>0</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Visual Comparison -->
+            <div class="card">
+                <div class="card-header">
+                    <div class="card-icon">📈</div>
+                    <h2 class="card-title">Performance Comparison</h2>
+                </div>
+                
+                <div class="comparison-bar">
+                    <div class="bar-label">
+                        <span class="bar-name">Code2LoRA</span>
+                        <span class="bar-value" style="color: var(--success);">63.8%</span>
+                    </div>
+                    <div class="bar-track">
+                        <div class="bar-fill code2lora" style="width: 100%;"></div>
+                    </div>
+                </div>
+                
+                <div class="comparison-bar">
+                    <div class="bar-label">
+                        <span class="bar-name">Full Fine-Tuning</span>
+                        <span class="bar-value">51.4%</span>
+                    </div>
+                    <div class="bar-track">
+                        <div class="bar-fill fft" style="width: 80.6%;"></div>
+                    </div>
+                </div>
+                
+                <div class="comparison-bar">
+                    <div class="bar-label">
+                        <span class="bar-name">Pretrained</span>
+                        <span class="bar-value">45.7%</span>
+                    </div>
+                    <div class="bar-track">
+                        <div class="bar-fill baseline" style="width: 71.6%;"></div>
+                    </div>
+                </div>
+                
+                <div class="comparison-bar">
+                    <div class="bar-label">
+                        <span class="bar-name">RAG (k=3)</span>
+                        <span class="bar-value" style="color: var(--warning);">39.7%</span>
+                    </div>
+                    <div class="bar-track">
+                        <div class="bar-fill rag" style="width: 62.2%;"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Footer Section -->
+            <div class="footer">
+                <div class="footer-card">
+                    <div class="footer-title">🔬 Key Findings</div>
+                    <div class="conclusion-point">
+                        <span class="conclusion-icon">✓</span>
+                        <span><strong>+18.1pp</strong> over pretrained on cross-repo evaluation</span>
+                    </div>
+                    <div class="conclusion-point">
+                        <span class="conclusion-icon">✓</span>
+                        <span>Context-based methods (RAG, ICL) underperform — retrieval noise hurts</span>
+                    </div>
+                    <div class="conclusion-point">
+                        <span class="conclusion-icon">✓</span>
+                        <span>Parametric adaptation outperforms context injection</span>
+                    </div>
+                    <div class="conclusion-point">
+                        <span class="conclusion-icon">✓</span>
+                        <span>Shared-basis achieves comparable performance with 8.5× fewer parameters</span>
+                    </div>
+                </div>
+                
+                <div class="footer-card">
+                    <div class="footer-title">💭 Insight</div>
+                    <p style="font-size: 14px; color: var(--text-medium); line-height: 1.6; margin-bottom: 12px;">
+                        Repository knowledge should be <strong>internalized</strong> into model parameters rather than injected as context. For assertion completion, targets depend on local context — retrieved chunks consume budget without direct benefit.
+                    </p>
+                    <p style="font-size: 14px; color: var(--text-medium); line-height: 1.6;">
+                        <strong>Single forward pass:</strong> &lt;10ms adapter generation per repository, zero inference token overhead.
+                    </p>
+                </div>
+                
+                <div class="footer-card qr-section">
+                    <div class="footer-title">📎 Resources</div>
+                    <div class="qr-placeholder">
+                        [QR Code]
+                    </div>
+                    <p style="font-size: 13px; color: var(--text-light);">
+                        Code & Benchmark<br>
+                        <span style="font-family: 'JetBrains Mono', monospace; font-size: 12px;">github.com/code2lora</span>
+                    </p>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
